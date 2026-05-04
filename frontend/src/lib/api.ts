@@ -346,8 +346,9 @@ export interface AgentTemplate {
 
 export interface PersistedToolCall {
   tool: string;
-  arguments: string;
-  result?: string;
+  arguments: unknown;
+  result?: unknown;
+  metadata?: Record<string, unknown>;
   success?: boolean;
   latency?: number;
 }
@@ -581,14 +582,15 @@ export async function fetchAgentState(agentId: string): Promise<{
 
 export interface AgentToolCallStart {
   tool: string;
-  arguments: string;
+  arguments: unknown;
 }
 
 export interface AgentToolCallEnd {
   tool: string;
   success: boolean;
   latency: number;
-  result?: string;
+  result?: unknown;
+  metadata?: Record<string, unknown>;
 }
 
 export async function sendAgentMessage(
@@ -664,6 +666,7 @@ export async function sendAgentMessage(
                 success: !!parsed.success,
                 latency: typeof parsed.latency === 'number' ? parsed.latency : 0,
                 result: parsed.result,
+                metadata: parsed.metadata,
               });
             } catch {
               /* skip */

@@ -1,6 +1,15 @@
-import { useState } from 'react';
-import { ChevronDown, ChevronRight, Loader2, CheckCircle2, XCircle } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { convertFileSrc } from '@tauri-apps/api/core';
+import {
+  ChevronDown,
+  ChevronRight,
+  Image as ImageIcon,
+  Loader2,
+  CheckCircle2,
+  XCircle,
+} from 'lucide-react';
 import type { ToolCallInfo } from '../../types';
+import { isTauri } from '../../lib/api';
 
 interface Props {
   toolCall: ToolCallInfo;
@@ -12,30 +21,47 @@ const statusConfig = {
   error: { icon: XCircle, color: 'var(--color-error)' },
 };
 
-function previewArgs(raw: string): string {
-  if (!raw) return '';
+function toArgString(raw: unknown): string {
+  if (raw === null || raw === undefined) return '';
+  if (typeof raw === 'string') return raw;
+  return JSON.stringify(raw);
+}
+
+function previewArgs(raw: unknown): string {
+  const str = toArgString(raw);
+  if (!str) return '';
   try {
-    const parsed = JSON.parse(raw);
+    const parsed = JSON.parse(str);
     if (parsed && typeof parsed === 'object') {
       const entries = Object.entries(parsed);
       if (entries.length === 0) return '';
       const [k, v] = entries[0];
-      const valStr =
-        typeof v === 'string' ? v : JSON.stringify(v);
+      const valStr = typeof v === 'string' ? v : JSON.stringify(v);
       const trimmed = valStr.length > 40 ? `${valStr.slice(0, 40)}…` : valStr;
       return entries.length === 1 ? `${k}: ${trimmed}` : `${k}: ${trimmed}, …`;
     }
   } catch {
     /* fall through */
   }
-  return raw.length > 60 ? `${raw.slice(0, 60)}…` : raw;
+  return str.length > 60 ? `${str.slice(0, 60)}…` : str;
 }
 
 export function ToolCallCard({ toolCall }: Props) {
   const [expanded, setExpanded] = useState(false);
+  const [imageErrored, setImageErrored] = useState(false);
   const config = statusConfig[toolCall.status];
   const StatusIcon = config.icon;
   const preview = previewArgs(toolCall.arguments);
+  const toolName =
+    typeof toolCall.tool === 'string' ? toolCall.tool : toArgString(toolCall.tool);
+  const argsText = formatJson(toolCall.arguments);
+  const resultText = formatJson(toolCall.result);
+  const imageArtifact = getGeneratedImageArtifact(toolCall);
+  const showImagePreview = !!imageArtifact?.src && !imageErrored;
+
+  useEffect(() => {
+    setImageErrored(false);
+  }, [imageArtifact?.src]);
 
   return (
     <div
@@ -65,7 +91,7 @@ export function ToolCallCard({ toolCall }: Props) {
         <span
           style={{ color: 'var(--color-text)', fontWeight: 500, flexShrink: 0 }}
         >
-          {toolCall.tool}
+          {toolName || 'tool'}
         </span>
         {preview && !expanded && (
           <span
@@ -95,7 +121,7 @@ export function ToolCallCard({ toolCall }: Props) {
           className="px-2.5 pb-2 pt-0.5"
           style={{ borderTop: '1px solid var(--color-border-subtle, var(--color-border))' }}
         >
-          {toolCall.arguments && (
+          {argsText && (
             <div className="mt-1.5">
               <div
                 style={{
@@ -120,11 +146,11 @@ export function ToolCallCard({ toolCall }: Props) {
                   wordBreak: 'break-all',
                 }}
               >
-                {formatJson(toolCall.arguments)}
+                {argsText}
               </pre>
             </div>
           )}
-          {toolCall.result && (
+          {resultText && (
             <div className="mt-1.5">
               <div
                 style={{
@@ -149,20 +175,117 @@ export function ToolCallCard({ toolCall }: Props) {
                   wordBreak: 'break-word',
                 }}
               >
-                {toolCall.result}
+                {resultText}
               </pre>
             </div>
           )}
+        </div>
+      )}
+      {imageArtifact && (
+        <div
+          className="px-2.5 pb-2"
+          style={{
+            borderTop: expanded
+              ? undefined
+              : '1px solid var(--color-border-subtle, var(--color-border))',
+          }}
+        >
+          {showImagePreview && (
+            <div
+              className="mt-2 overflow-hidden rounded-md"
+              style={{
+                background: 'var(--color-bg-secondary)',
+                border: '1px solid var(--color-border-subtle, var(--color-border))',
+                width: 'min(320px, 100%)',
+              }}
+            >
+              <img
+                src={imageArtifact.src}
+                alt="Generated image preview"
+                className="block max-w-full"
+                style={{ maxHeight: 320, objectFit: 'contain' }}
+                onError={() => setImageErrored(true)}
+              />
+            </div>
+          )}
+          <div
+            className="mt-1.5 flex items-center gap-1.5 min-w-0"
+            style={{ color: 'var(--color-text-tertiary)', fontSize: 10.5 }}
+            title={imageArtifact.label}
+          >
+            <ImageIcon size={12} style={{ flexShrink: 0 }} />
+            <span className="truncate">
+              {showImagePreview ? imageArtifact.label : `Generated image: ${imageArtifact.label}`}
+            </span>
+          </div>
         </div>
       )}
     </div>
   );
 }
 
-function formatJson(raw: string): string {
+function formatJson(raw: unknown): string {
+  if (raw === null || raw === undefined) return '';
+  if (typeof raw !== 'string') return JSON.stringify(raw, null, 2) ?? String(raw);
   try {
     return JSON.stringify(JSON.parse(raw), null, 2);
   } catch {
     return raw;
   }
+}
+
+function asRecord(raw: unknown): Record<string, unknown> | null {
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    return raw as Record<string, unknown>;
+  }
+  if (typeof raw !== 'string') return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function firstString(...values: unknown[]): string {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return '';
+}
+
+function toDisplayText(raw: unknown): string {
+  if (raw === null || raw === undefined) return '';
+  return typeof raw === 'string' ? raw : JSON.stringify(raw) ?? String(raw);
+}
+
+function extractImageReference(raw: unknown): { path?: string; url?: string } {
+  const text = toDisplayText(raw);
+  const url = text.match(/https?:\/\/[^\s"')]+/i)?.[0];
+  const path = text.match(/((?:\/|[A-Za-z]:\\)[^\n"]+?\.(?:png|jpe?g|webp|gif|bmp|tiff?))/i)?.[0];
+  return { path, url };
+}
+
+function getGeneratedImageArtifact(
+  toolCall: ToolCallInfo,
+): { src: string; label: string } | null {
+  if (toolCall.status !== 'success') return null;
+  if (String(toolCall.tool) !== 'image_generate') return null;
+
+  const metadata = asRecord(toolCall.metadata);
+  const result = asRecord(toolCall.result);
+  const extracted = extractImageReference(toolCall.result);
+  const path = firstString(metadata?.path, result?.path, extracted.path);
+  const url = firstString(metadata?.url, result?.url, extracted.url);
+
+  if (url) return { src: url, label: url };
+  if (path) {
+    return {
+      src: isTauri() ? convertFileSrc(path) : '',
+      label: path,
+    };
+  }
+  return null;
 }

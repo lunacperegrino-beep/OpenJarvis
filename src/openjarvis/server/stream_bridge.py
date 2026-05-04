@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator
 
 from fastapi.responses import StreamingResponse
 
@@ -54,6 +54,74 @@ def _estimate_prompt_tokens(messages: list) -> int:
                 args = fn.get("arguments", "") if isinstance(fn, dict) else ""
                 total += max(1, len(str(args)) // 4)
     return total
+
+
+def _json_safe_dict(value: Any) -> dict[str, Any]:
+    """Return a JSON-serializable shallow dict."""
+    if not isinstance(value, dict):
+        return {}
+
+    safe: dict[str, Any] = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            continue
+        try:
+            json.dumps(item)
+        except (TypeError, ValueError):
+            continue
+        safe[key] = item
+    return safe
+
+
+def _successful_image_result(tool_results: list[Any]) -> dict[str, str] | None:
+    """Extract display metadata for a successful image generation result."""
+    for tr in tool_results:
+        if getattr(tr, "tool_name", "") != "image_generate":
+            continue
+        if not getattr(tr, "success", False):
+            continue
+
+        metadata = _json_safe_dict(getattr(tr, "metadata", {}) or {})
+
+        path = metadata.get("path")
+        url = metadata.get("url")
+        provider = metadata.get("provider")
+        content = getattr(tr, "content", "") or ""
+
+        if isinstance(path, str) and path:
+            return {"kind": "path", "value": path, "provider": str(provider or "")}
+        if isinstance(url, str) and url:
+            return {"kind": "url", "value": url, "provider": str(provider or "")}
+        if content:
+            return {"kind": "text", "value": str(content), "provider": str(provider or "")}
+    return None
+
+
+def _normalize_agent_content(content: str, tool_results: list[Any]) -> str:
+    """Keep the streamed answer consistent with successful artifact tools."""
+    image = _successful_image_result(tool_results)
+    if not image:
+        return content
+
+    lowered = content.lower()
+    contradicts_image_tool = any(
+        phrase in lowered
+        for phrase in (
+            "cannot generate images",
+            "can't generate images",
+            "unable to generate images",
+            "do not generate images",
+            "don't generate images",
+        )
+    )
+    if content.strip() and not contradicts_image_tool:
+        return content
+
+    if image["kind"] == "path":
+        return f"Generated the image and saved it to {image['value']}."
+    if image["kind"] == "url":
+        return f"Generated the image: {image['value']}"
+    return f"Generated the image. {image['value']}"
 
 
 class AgentStreamBridge:
@@ -228,6 +296,7 @@ class AgentStreamBridge:
                         "success": tr.success,
                         "output": tr.content,
                         "latency_ms": tr.latency_seconds * 1000,
+                        "metadata": _json_safe_dict(getattr(tr, "metadata", {})),
                     }
                 )
 
@@ -237,62 +306,16 @@ class AgentStreamBridge:
                     {"results": tool_results_data},
                 )
 
-            # Stream content using real LLM token streaming via
-            # engine.stream_full() when the engine is available.
-            content = agent_result.content or ""
-            engine = getattr(self._agent, "_engine", None)
-            used_real_streaming = False
+            # agent.run() is the authoritative execution path because it has
+            # the tool-call context. Do not call engine.stream_full() here:
+            # that would re-run the original user prompt without tool results
+            # and can contradict successful tool work.
+            content = _normalize_agent_content(
+                agent_result.content or "",
+                agent_result.tool_results,
+            )
 
-            if engine is not None and hasattr(engine, "stream_full") and content:
-                # Re-stream using the engine for real token delivery.
-                # Build the same messages the agent used for its final turn.
-                try:
-                    from openjarvis.core.types import Message as MsgType
-                    from openjarvis.core.types import Role as RoleType
-
-                    replay_messages = []
-                    for m in self._request.messages:
-                        role = (
-                            RoleType(m.role)
-                            if m.role in {r.value for r in RoleType}
-                            else RoleType.USER
-                        )
-                        replay_messages.append(
-                            MsgType(
-                                role=role,
-                                content=m.content or "",
-                                name=m.name,
-                                tool_call_id=m.tool_call_id,
-                            )
-                        )
-
-                    async for sc in engine.stream_full(
-                        replay_messages,
-                        model=self._model,
-                    ):
-                        if sc.content:
-                            chunk = ChatCompletionChunk(
-                                id=self._chunk_id,
-                                model=self._model,
-                                choices=[
-                                    StreamChoice(
-                                        delta=DeltaMessage(content=sc.content),
-                                    )
-                                ],
-                            )
-                            yield f"data: {chunk.model_dump_json()}\n\n"
-                    used_real_streaming = True
-                except Exception as stream_exc:
-                    import logging as _logging
-
-                    _logger = _logging.getLogger("openjarvis.server")
-                    _logger.warning(
-                        "Real streaming failed, falling back to word replay: %s",
-                        stream_exc,
-                    )
-
-            # Fallback: word-by-word replay if real streaming was not used
-            if not used_real_streaming and content:
+            if content:
                 words = content.split(" ")
                 for i, word in enumerate(words):
                     token = word if i == 0 else " " + word

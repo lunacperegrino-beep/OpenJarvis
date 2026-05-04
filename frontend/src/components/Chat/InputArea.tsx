@@ -193,6 +193,7 @@ export function InputArea() {
               tc.status = data.success ? 'success' : 'error';
               tc.latency = data.latency;
               tc.result = data.result;
+              tc.metadata = data.metadata;
             }
             setStreamState({
               phase: 'Generating...',

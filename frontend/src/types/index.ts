@@ -24,13 +24,15 @@ export interface InferenceEndEvent {
 
 export interface ToolCallStartEvent {
   tool: string;
-  arguments: string;
+  arguments: unknown;
 }
 
 export interface ToolCallEndEvent {
   tool: string;
   success: boolean;
   latency: number;
+  result?: unknown;
+  metadata?: Record<string, unknown>;
 }
 
 // --- Chat Types ---
@@ -38,9 +40,10 @@ export interface ToolCallEndEvent {
 export interface ToolCallInfo {
   id: string;
   tool: string;
-  arguments: string;
+  arguments: unknown;
   status: 'running' | 'success' | 'error';
-  result?: string;
+  result?: unknown;
+  metadata?: Record<string, unknown>;
   latency?: number;
 }
 
