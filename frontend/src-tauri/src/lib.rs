@@ -341,6 +341,21 @@ impl Default for SetupStatus {
 
 type SharedStatus = Arc<Mutex<SetupStatus>>;
 
+#[derive(serde::Serialize)]
+struct ReadinessItem {
+    id: String,
+    label: String,
+    state: String,
+    detail: String,
+}
+
+#[derive(serde::Serialize)]
+struct RuntimeReadiness {
+    checked_at: u64,
+    api_base: String,
+    items: Vec<ReadinessItem>,
+}
+
 // ---------------------------------------------------------------------------
 // Health-check helpers
 // ---------------------------------------------------------------------------
@@ -857,6 +872,83 @@ fn api_base() -> String {
     format!("http://127.0.0.1:{}", JARVIS_PORT)
 }
 
+fn readiness_item(id: &str, label: &str, state: &str, detail: impl Into<String>) -> ReadinessItem {
+    ReadinessItem {
+        id: id.into(),
+        label: label.into(),
+        state: state.into(),
+        detail: detail.into(),
+    }
+}
+
+fn normalize_model_name(name: &str) -> String {
+    name.strip_suffix(":latest").unwrap_or(name).to_string()
+}
+
+fn is_cloud_model(model: &str) -> bool {
+    let lower = model.to_ascii_lowercase();
+    [
+        "gpt-",
+        "o1-",
+        "o3-",
+        "o4-",
+        "claude-",
+        "gemini-",
+        "openrouter/",
+    ]
+    .iter()
+    .any(|prefix| lower.starts_with(prefix))
+}
+
+fn check_image_output_folder() -> ReadinessItem {
+    use std::io::Write;
+
+    let folder = std::path::PathBuf::from(home_dir())
+        .join("Pictures")
+        .join("jarvis");
+    if let Err(e) = std::fs::create_dir_all(&folder) {
+        return readiness_item(
+            "permissions",
+            "Image folder",
+            "error",
+            format!("Cannot create {}: {}", folder.display(), e),
+        );
+    }
+
+    let probe = folder.join(".openjarvis-write-test");
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&probe)
+    {
+        Ok(mut file) => {
+            if let Err(e) = file.write_all(b"ok") {
+                let _ = std::fs::remove_file(&probe);
+                return readiness_item(
+                    "permissions",
+                    "Image folder",
+                    "error",
+                    format!("Cannot write to {}: {}", folder.display(), e),
+                );
+            }
+            let _ = std::fs::remove_file(&probe);
+            readiness_item(
+                "permissions",
+                "Image folder",
+                "ready",
+                format!("Writable: {}", folder.display()),
+            )
+        }
+        Err(e) => readiness_item(
+            "permissions",
+            "Image folder",
+            "error",
+            format!("Cannot write to {}: {}", folder.display(), e),
+        ),
+    }
+}
+
 #[tauri::command]
 async fn get_setup_status(state: tauri::State<'_, SharedStatus>) -> Result<SetupStatus, String> {
     Ok(state.lock().await.clone())
@@ -865,6 +957,182 @@ async fn get_setup_status(state: tauri::State<'_, SharedStatus>) -> Result<Setup
 #[tauri::command]
 fn get_api_base() -> String {
     api_base()
+}
+
+#[tauri::command]
+async fn check_runtime_readiness(
+    api_url: String,
+    selected_model: String,
+) -> Result<RuntimeReadiness, String> {
+    let base = if api_url.is_empty() {
+        api_base()
+    } else {
+        api_url.trim_end_matches('/').to_string()
+    };
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let mut items = Vec::new();
+
+    match client.get(format!("{}/health", base)).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            items.push(readiness_item(
+                "backend",
+                "Backend API",
+                "ready",
+                "Responding",
+            ));
+        }
+        Ok(resp) => {
+            items.push(readiness_item(
+                "backend",
+                "Backend API",
+                "error",
+                format!("Health returned {}", resp.status()),
+            ));
+        }
+        Err(e) => {
+            items.push(readiness_item(
+                "backend",
+                "Backend API",
+                "error",
+                format!("Cannot connect: {}", e),
+            ));
+        }
+    }
+
+    let mut local_models = Vec::new();
+    match client
+        .get(format!("http://127.0.0.1:{}/api/tags", OLLAMA_PORT))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
+            Ok(body) => {
+                if let Some(models) = body.get("models").and_then(|m| m.as_array()) {
+                    local_models = models
+                        .iter()
+                        .filter_map(|m| m.get("name").and_then(|n| n.as_str()))
+                        .map(str::to_string)
+                        .collect();
+                }
+                let detail = if local_models.is_empty() {
+                    "Responding, no local models listed".to_string()
+                } else {
+                    format!("{} local models available", local_models.len())
+                };
+                items.push(readiness_item("ollama", "Ollama", "ready", detail));
+            }
+            Err(e) => {
+                items.push(readiness_item(
+                    "ollama",
+                    "Ollama",
+                    "warning",
+                    format!("Responding, but tags response was invalid: {}", e),
+                ));
+            }
+        },
+        Ok(resp) => {
+            items.push(readiness_item(
+                "ollama",
+                "Ollama",
+                "error",
+                format!("Tags returned {}", resp.status()),
+            ));
+        }
+        Err(e) => {
+            items.push(readiness_item(
+                "ollama",
+                "Ollama",
+                "error",
+                format!("Cannot connect: {}", e),
+            ));
+        }
+    }
+
+    let selected = selected_model.trim();
+    if selected.is_empty() {
+        items.push(readiness_item(
+            "model",
+            "Selected model",
+            "warning",
+            "No model selected",
+        ));
+    } else if is_cloud_model(selected) {
+        items.push(readiness_item(
+            "model",
+            "Selected model",
+            "ready",
+            format!("Cloud model selected: {}", selected),
+        ));
+    } else {
+        let wanted = normalize_model_name(selected);
+        let has_model = local_models
+            .iter()
+            .map(|m| normalize_model_name(m))
+            .any(|m| m == wanted);
+        if has_model {
+            items.push(readiness_item(
+                "model",
+                "Selected model",
+                "ready",
+                selected.to_string(),
+            ));
+        } else {
+            items.push(readiness_item(
+                "model",
+                "Selected model",
+                "error",
+                format!("{} is not downloaded in Ollama", selected),
+            ));
+        }
+    }
+
+    match client
+        .get("http://127.0.0.1:7860/sdapi/v1/options")
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            items.push(readiness_item(
+                "drawthings",
+                "Draw Things",
+                "ready",
+                "API server responding",
+            ));
+        }
+        Ok(resp) => {
+            items.push(readiness_item(
+                "drawthings",
+                "Draw Things",
+                "error",
+                format!("API returned {}", resp.status()),
+            ));
+        }
+        Err(_) => {
+            items.push(readiness_item(
+                "drawthings",
+                "Draw Things",
+                "error",
+                "Enable Draw Things API Server on port 7860",
+            ));
+        }
+    }
+
+    items.push(check_image_output_folder());
+
+    let checked_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    Ok(RuntimeReadiness {
+        checked_at,
+        api_base: base,
+        items,
+    })
 }
 
 #[tauri::command]
@@ -1766,6 +2034,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_setup_status,
             get_api_base,
+            check_runtime_readiness,
             start_backend,
             stop_backend,
             check_health,

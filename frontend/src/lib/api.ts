@@ -183,6 +183,92 @@ export async function fetchServerInfo(): Promise<ServerInfo> {
   return res.json();
 }
 
+export interface RuntimeReadinessItem {
+  id: string;
+  label: string;
+  state: 'ready' | 'warning' | 'error' | 'unknown';
+  detail: string;
+}
+
+export interface RuntimeReadiness {
+  checked_at: number;
+  api_base: string;
+  items: RuntimeReadinessItem[];
+}
+
+export async function fetchRuntimeReadiness(selectedModel: string): Promise<RuntimeReadiness> {
+  if (isTauri()) {
+    return tauriInvoke<RuntimeReadiness>('check_runtime_readiness', { selectedModel });
+  }
+
+  const checkedAt = Date.now();
+  const items: RuntimeReadinessItem[] = [];
+  const base = getBase();
+
+  try {
+    const res = await fetch(`${base}/health`);
+    items.push({
+      id: 'backend',
+      label: 'Backend API',
+      state: res.ok ? 'ready' : 'error',
+      detail: res.ok ? 'Responding' : `Health returned ${res.status}`,
+    });
+  } catch (err) {
+    items.push({
+      id: 'backend',
+      label: 'Backend API',
+      state: 'error',
+      detail: err instanceof Error ? err.message : 'Cannot connect',
+    });
+  }
+
+  try {
+    const res = await fetch(`${base}/v1/models`);
+    const data = res.ok ? await res.json() : null;
+    const models = Array.isArray(data?.data) ? data.data.map((m: ModelInfo) => m.id) : [];
+    items.push({
+      id: 'ollama',
+      label: 'Ollama',
+      state: res.ok ? 'ready' : 'error',
+      detail: res.ok ? `${models.length} models visible through backend` : `Models returned ${res.status}`,
+    });
+    items.push({
+      id: 'model',
+      label: 'Selected model',
+      state: !selectedModel || models.includes(selectedModel) ? 'ready' : 'warning',
+      detail: selectedModel || 'No model selected',
+    });
+  } catch {
+    items.push({
+      id: 'ollama',
+      label: 'Ollama',
+      state: 'unknown',
+      detail: 'Could not inspect models from browser mode',
+    });
+    items.push({
+      id: 'model',
+      label: 'Selected model',
+      state: selectedModel ? 'unknown' : 'warning',
+      detail: selectedModel || 'No model selected',
+    });
+  }
+
+  items.push({
+    id: 'drawthings',
+    label: 'Draw Things',
+    state: 'unknown',
+    detail: 'Desktop app checks this through Tauri',
+  });
+  items.push({
+    id: 'permissions',
+    label: 'Image folder',
+    state: 'unknown',
+    detail: 'Desktop app checks write access through Tauri',
+  });
+
+  return { checked_at: checkedAt, api_base: base, items };
+}
+
 export async function checkHealth(): Promise<boolean> {
   if (isTauri()) {
     try {

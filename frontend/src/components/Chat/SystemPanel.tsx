@@ -3,7 +3,6 @@ import {
   Zap,
   Activity,
   Thermometer,
-  DollarSign,
   TrendingDown,
   Cloud,
   HardDrive,
@@ -11,9 +10,17 @@ import {
   X,
   Trophy,
   ExternalLink,
+  AlertTriangle,
+  Bot,
+  CheckCircle2,
+  Cpu,
+  FolderCheck,
+  Image as ImageIcon,
+  RefreshCw,
+  Server,
 } from 'lucide-react';
 import { useAppStore } from '../../lib/store';
-import { getBase } from '../../lib/api';
+import { fetchRuntimeReadiness, getBase, type RuntimeReadinessItem } from '../../lib/api';
 
 interface EnergyData {
   total_energy_j?: number;
@@ -39,8 +46,11 @@ export function SystemPanel() {
   const toggleSystemPanel = useAppStore((s) => s.toggleSystemPanel);
   const optInEnabled = useAppStore((s) => s.optInEnabled);
   const setOptInModalOpen = useAppStore((s) => s.setOptInModalOpen);
+  const selectedModel = useAppStore((s) => s.selectedModel);
   const [energy, setEnergy] = useState<EnergyData | null>(null);
   const [telemetry, setTelemetry] = useState<TelemetryStats | null>(null);
+  const [readiness, setReadiness] = useState<RuntimeReadinessItem[]>([]);
+  const [readinessLoading, setReadinessLoading] = useState(true);
 
   const fetchData = useCallback(async () => {
     try {
@@ -59,6 +69,31 @@ export function SystemPanel() {
       // best-effort
     }
   }, []);
+
+  const refreshReadiness = useCallback(async () => {
+    setReadinessLoading(true);
+    try {
+      const status = await fetchRuntimeReadiness(selectedModel);
+      setReadiness(status.items);
+    } catch {
+      setReadiness([
+        {
+          id: 'backend',
+          label: 'Backend API',
+          state: 'error',
+          detail: 'Readiness check failed',
+        },
+      ]);
+    } finally {
+      setReadinessLoading(false);
+    }
+  }, [selectedModel]);
+
+  useEffect(() => {
+    refreshReadiness();
+    const interval = setInterval(refreshReadiness, 10000);
+    return () => clearInterval(interval);
+  }, [refreshReadiness]);
 
   useEffect(() => {
     fetchData();
@@ -103,6 +138,38 @@ export function SystemPanel() {
       </div>
 
       <div className="flex flex-col gap-4 p-4">
+        {/* Readiness */}
+        <section>
+          <div className="flex items-center justify-between mb-2">
+            <h4 className="text-[11px] font-medium uppercase tracking-wide" style={{ color: 'var(--color-text-tertiary)' }}>
+              Readiness
+            </h4>
+            <button
+              onClick={refreshReadiness}
+              className="p-1 rounded-md transition-colors cursor-pointer"
+              style={{ color: 'var(--color-text-tertiary)' }}
+              title="Refresh readiness"
+              disabled={readinessLoading}
+            >
+              <RefreshCw size={12} className={readinessLoading ? 'animate-spin' : ''} />
+            </button>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            {readiness.length === 0 ? (
+              <ReadinessRow
+                item={{
+                  id: 'loading',
+                  label: 'Checking services',
+                  state: 'unknown',
+                  detail: 'Inspecting local runtime...',
+                }}
+              />
+            ) : (
+              readiness.map((item) => <ReadinessRow key={item.id} item={item} />)
+            )}
+          </div>
+        </section>
+
         {/* Session Stats */}
         <section>
           <h4 className="text-[11px] font-medium uppercase tracking-wide mb-2" style={{ color: 'var(--color-text-tertiary)' }}>
@@ -303,6 +370,52 @@ function MiniStat({
       </div>
     </div>
   );
+}
+
+function ReadinessRow({ item }: { item: RuntimeReadinessItem }) {
+  const serviceIcons = {
+    backend: Server,
+    ollama: Cpu,
+    model: Bot,
+    drawthings: ImageIcon,
+    permissions: FolderCheck,
+  };
+  const stateIcons = {
+    ready: CheckCircle2,
+    warning: AlertTriangle,
+    error: AlertTriangle,
+    unknown: Activity,
+  };
+  const Icon = serviceIcons[item.id as keyof typeof serviceIcons] ?? Activity;
+  const StateIcon = stateIcons[item.state] ?? Activity;
+  const color = getReadinessColor(item.state);
+
+  return (
+    <div
+      className="flex items-start gap-2 rounded-lg px-2.5 py-2"
+      style={{ background: 'var(--color-bg-secondary)', border: '1px solid var(--color-border)' }}
+    >
+      <Icon size={13} style={{ color: 'var(--color-text-tertiary)', marginTop: 1, flexShrink: 0 }} />
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-1.5 min-w-0">
+          <span className="text-xs font-medium truncate" style={{ color: 'var(--color-text)' }}>
+            {item.label}
+          </span>
+          <StateIcon size={11} style={{ color, flexShrink: 0 }} />
+        </div>
+        <div className="text-[10px] leading-snug mt-0.5 break-words" style={{ color: 'var(--color-text-tertiary)' }}>
+          {item.detail}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function getReadinessColor(state: RuntimeReadinessItem['state']): string {
+  if (state === 'ready') return 'var(--color-success)';
+  if (state === 'warning') return 'var(--color-warning, #d97706)';
+  if (state === 'error') return 'var(--color-error)';
+  return 'var(--color-text-tertiary)';
 }
 
 function formatNumber(n: number): string {
