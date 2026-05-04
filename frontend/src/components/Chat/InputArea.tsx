@@ -83,8 +83,8 @@ export function InputArea() {
     resetStream();
   }, [resetStream]);
 
-  const sendMessage = useCallback(async () => {
-    const content = input.trim();
+  const sendMessage = useCallback(async (overrideContent?: string) => {
+    const content = (overrideContent ?? input).trim();
     if (!content || streamState.isStreaming) return;
 
     setInput('');
@@ -307,6 +307,20 @@ export function InputArea() {
     resetStream,
   ]);
 
+  useEffect(() => {
+    const regenerateImage = (event: Event) => {
+      const detail = (event as CustomEvent<{ prompt?: string }>).detail;
+      const prompt = detail?.prompt?.trim();
+      if (!prompt) return;
+      void sendMessage(`Generate an image: ${prompt}`);
+    };
+
+    window.addEventListener('openjarvis:regenerate-image', regenerateImage);
+    return () => {
+      window.removeEventListener('openjarvis:regenerate-image', regenerateImage);
+    };
+  }, [sendMessage]);
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -353,7 +367,7 @@ export function InputArea() {
               reason={micReason}
             />
             <button
-              onClick={sendMessage}
+              onClick={() => sendMessage()}
               disabled={!input.trim() || modelLoading}
               className="p-2 rounded-xl transition-colors shrink-0 cursor-pointer disabled:opacity-30 disabled:cursor-default"
               style={{

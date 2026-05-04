@@ -769,6 +769,90 @@ async fn boot_backend(backend: SharedBackend, status: SharedStatus) {
 // Tauri commands
 // ---------------------------------------------------------------------------
 
+fn validate_artifact_path(path: &str) -> Result<std::path::PathBuf, String> {
+    let raw = std::path::PathBuf::from(path);
+    let canonical = raw
+        .canonicalize()
+        .map_err(|e| format!("Could not resolve artifact path: {}", e))?;
+    if !canonical.is_file() {
+        return Err("Artifact path is not a file.".into());
+    }
+
+    let extension = canonical
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let allowed = ["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff"];
+    if !allowed.contains(&extension.as_str()) {
+        return Err("Only image artifacts can be opened from chat.".into());
+    }
+
+    Ok(canonical)
+}
+
+#[tauri::command]
+async fn open_artifact(path: String) -> Result<(), String> {
+    let artifact = validate_artifact_path(&path)?;
+    #[cfg(target_os = "macos")]
+    let status = std::process::Command::new("open")
+        .arg(&artifact)
+        .status()
+        .map_err(|e| format!("Failed to open artifact: {}", e))?;
+
+    #[cfg(target_os = "windows")]
+    let status = std::process::Command::new("cmd")
+        .args(["/C", "start", ""])
+        .arg(artifact.to_string_lossy().to_string())
+        .status()
+        .map_err(|e| format!("Failed to open artifact: {}", e))?;
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let status = std::process::Command::new("xdg-open")
+        .arg(&artifact)
+        .status()
+        .map_err(|e| format!("Failed to open artifact: {}", e))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("Open command failed with status {}", status))
+    }
+}
+
+#[tauri::command]
+async fn reveal_artifact(path: String) -> Result<(), String> {
+    let artifact = validate_artifact_path(&path)?;
+    #[cfg(target_os = "macos")]
+    let status = std::process::Command::new("open")
+        .arg("-R")
+        .arg(&artifact)
+        .status()
+        .map_err(|e| format!("Failed to reveal artifact: {}", e))?;
+
+    #[cfg(target_os = "windows")]
+    let status = std::process::Command::new("explorer")
+        .arg(format!("/select,{}", artifact.to_string_lossy()))
+        .status()
+        .map_err(|e| format!("Failed to reveal artifact: {}", e))?;
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let status = std::process::Command::new("xdg-open")
+        .arg(
+            artifact
+                .parent()
+                .ok_or_else(|| "Artifact has no parent folder.".to_string())?,
+        )
+        .status()
+        .map_err(|e| format!("Failed to reveal artifact: {}", e))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("Reveal command failed with status {}", status))
+    }
+}
+
 fn api_base() -> String {
     format!("http://127.0.0.1:{}", JARVIS_PORT)
 }
@@ -1700,6 +1784,8 @@ pub fn run() {
             submit_savings,
             transcribe_audio,
             speech_health,
+            open_artifact,
+            reveal_artifact,
             pull_ollama_model,
             delete_ollama_model,
             save_cloud_key,

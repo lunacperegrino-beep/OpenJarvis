@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { Component, useState, useMemo, type ErrorInfo, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import rehypeHighlight from 'rehype-highlight';
 import rehypeKatex from 'rehype-katex';
@@ -19,6 +19,39 @@ function stripThinkTags(text: string): string {
 
 interface Props {
   message: ChatMessage;
+}
+
+class ToolCallErrorBoundary extends Component<
+  { children: ReactNode },
+  { failed: boolean }
+> {
+  state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error('Tool call render failed', error, info);
+  }
+
+  render() {
+    if (this.state.failed) {
+      return (
+        <div
+          className="rounded-md px-3 py-2 text-xs"
+          style={{
+            background: 'var(--color-bg-tertiary, var(--color-bg-secondary))',
+            border: '1px solid var(--color-border-subtle, var(--color-border))',
+            color: 'var(--color-text-tertiary)',
+          }}
+        >
+          Tool output could not be displayed.
+        </div>
+      );
+    }
+    return this.props.children;
+  }
 }
 
 function getTextContent(node: any): string {
@@ -127,7 +160,9 @@ export function MessageBubble({ message }: Props) {
       {message.toolCalls && message.toolCalls.length > 0 && (
         <div className="mb-3 flex flex-col gap-2">
           {message.toolCalls.map((tc) => (
-            <ToolCallCard key={tc.id} toolCall={tc} />
+            <ToolCallErrorBoundary key={tc.id}>
+              <ToolCallCard toolCall={tc} />
+            </ToolCallErrorBoundary>
           ))}
         </div>
       )}

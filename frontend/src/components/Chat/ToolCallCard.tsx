@@ -1,18 +1,34 @@
-import { useEffect, useState } from 'react';
-import { convertFileSrc } from '@tauri-apps/api/core';
+import { useEffect, useState, type ReactNode } from 'react';
+import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import {
+  Check,
   ChevronDown,
   ChevronRight,
+  Copy,
+  ExternalLink,
+  FolderOpen,
   Image as ImageIcon,
   Loader2,
   CheckCircle2,
+  RefreshCw,
   XCircle,
 } from 'lucide-react';
+import { toast } from 'sonner';
 import type { ToolCallInfo } from '../../types';
 import { isTauri } from '../../lib/api';
 
 interface Props {
   toolCall: ToolCallInfo;
+}
+
+interface GeneratedImageArtifact {
+  src: string;
+  label: string;
+  path?: string;
+  url?: string;
+  prompt?: string;
+  provider?: string;
+  size?: string;
 }
 
 const statusConfig = {
@@ -49,19 +65,65 @@ function previewArgs(raw: unknown): string {
 export function ToolCallCard({ toolCall }: Props) {
   const [expanded, setExpanded] = useState(false);
   const [imageErrored, setImageErrored] = useState(false);
+  const [promptCopied, setPromptCopied] = useState(false);
   const config = statusConfig[toolCall.status];
   const StatusIcon = config.icon;
   const preview = previewArgs(toolCall.arguments);
-  const toolName =
-    typeof toolCall.tool === 'string' ? toolCall.tool : toArgString(toolCall.tool);
   const argsText = formatJson(toolCall.arguments);
   const resultText = formatJson(toolCall.result);
   const imageArtifact = getGeneratedImageArtifact(toolCall);
   const showImagePreview = !!imageArtifact?.src && !imageErrored;
+  const toolDisplay = getToolDisplay(toolCall, imageArtifact, preview);
 
   useEffect(() => {
     setImageErrored(false);
   }, [imageArtifact?.src]);
+
+  const openArtifact = async () => {
+    if (!imageArtifact) return;
+    try {
+      if (imageArtifact.path && isTauri()) {
+        await invoke('open_artifact', { path: imageArtifact.path });
+      } else if (imageArtifact.url) {
+        window.open(imageArtifact.url, '_blank', 'noopener,noreferrer');
+      } else if (imageArtifact.src) {
+        window.open(imageArtifact.src, '_blank', 'noopener,noreferrer');
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const revealArtifact = async () => {
+    if (!imageArtifact?.path) return;
+    try {
+      await invoke('reveal_artifact', { path: imageArtifact.path });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const copyPrompt = async () => {
+    if (!imageArtifact?.prompt) return;
+    try {
+      await navigator.clipboard.writeText(imageArtifact.prompt);
+      setPromptCopied(true);
+      setTimeout(() => setPromptCopied(false), 1600);
+      toast.success('Prompt copied');
+    } catch {
+      toast.error('Could not copy prompt');
+    }
+  };
+
+  const regenerateImage = () => {
+    if (!imageArtifact?.prompt) return;
+    window.dispatchEvent(
+      new CustomEvent('openjarvis:regenerate-image', {
+        detail: { prompt: imageArtifact.prompt },
+      }),
+    );
+    toast.success('Regenerating image');
+  };
 
   return (
     <div
@@ -91,14 +153,14 @@ export function ToolCallCard({ toolCall }: Props) {
         <span
           style={{ color: 'var(--color-text)', fontWeight: 500, flexShrink: 0 }}
         >
-          {toolName || 'tool'}
+          {toolDisplay.title}
         </span>
-        {preview && !expanded && (
+        {toolDisplay.subtitle && !expanded && (
           <span
             className="truncate"
             style={{ color: 'var(--color-text-tertiary)', fontSize: 10.5 }}
           >
-            {preview}
+            {toolDisplay.subtitle}
           </span>
         )}
         <div className="flex-1" />
@@ -218,9 +280,68 @@ export function ToolCallCard({ toolCall }: Props) {
               {showImagePreview ? imageArtifact.label : `Generated image: ${imageArtifact.label}`}
             </span>
           </div>
+          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+            <ArtifactActionButton
+              icon={<ExternalLink size={12} />}
+              label="Open"
+              onClick={openArtifact}
+            />
+            {imageArtifact.path && isTauri() && (
+              <ArtifactActionButton
+                icon={<FolderOpen size={12} />}
+                label="Reveal"
+                onClick={revealArtifact}
+              />
+            )}
+            {imageArtifact.prompt && (
+              <>
+                <ArtifactActionButton
+                  icon={promptCopied ? <Check size={12} /> : <Copy size={12} />}
+                  label={promptCopied ? 'Copied' : 'Copy prompt'}
+                  onClick={copyPrompt}
+                />
+                <ArtifactActionButton
+                  icon={<RefreshCw size={12} />}
+                  label="Regenerate"
+                  onClick={regenerateImage}
+                />
+              </>
+            )}
+          </div>
         </div>
       )}
     </div>
+  );
+}
+
+function ArtifactActionButton({
+  icon,
+  label,
+  onClick,
+}: {
+  icon: ReactNode;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={(event) => {
+        event.stopPropagation();
+        onClick();
+      }}
+      className="inline-flex items-center gap-1 rounded px-2 py-1 transition-colors cursor-pointer"
+      style={{
+        background: 'var(--color-bg-secondary)',
+        border: '1px solid var(--color-border-subtle, var(--color-border))',
+        color: 'var(--color-text-secondary)',
+        fontFamily: 'inherit',
+        fontSize: 10.5,
+      }}
+    >
+      {icon}
+      <span>{label}</span>
+    </button>
   );
 }
 
@@ -270,22 +391,56 @@ function extractImageReference(raw: unknown): { path?: string; url?: string } {
 
 function getGeneratedImageArtifact(
   toolCall: ToolCallInfo,
-): { src: string; label: string } | null {
+): GeneratedImageArtifact | null {
   if (toolCall.status !== 'success') return null;
   if (String(toolCall.tool) !== 'image_generate') return null;
 
   const metadata = asRecord(toolCall.metadata);
   const result = asRecord(toolCall.result);
+  const args = asRecord(toolCall.arguments);
   const extracted = extractImageReference(toolCall.result);
   const path = firstString(metadata?.path, result?.path, extracted.path);
   const url = firstString(metadata?.url, result?.url, extracted.url);
+  const prompt = firstString(args?.prompt, metadata?.prompt, result?.prompt);
+  const provider = firstString(metadata?.provider, result?.provider);
+  const size = firstString(metadata?.size, args?.size, result?.size);
 
-  if (url) return { src: url, label: url };
+  if (url) return { src: url, label: url, url, prompt, provider, size };
   if (path) {
     return {
       src: isTauri() ? convertFileSrc(path) : '',
       label: path,
+      path,
+      prompt,
+      provider,
+      size,
     };
   }
   return null;
+}
+
+function getToolDisplay(
+  toolCall: ToolCallInfo,
+  imageArtifact: GeneratedImageArtifact | null,
+  fallbackPreview: string,
+): { title: string; subtitle: string } {
+  if (String(toolCall.tool) === 'image_generate') {
+    if (toolCall.status === 'running') {
+      return { title: 'Generating image', subtitle: fallbackPreview };
+    }
+    if (toolCall.status === 'error') {
+      return { title: 'Image generation failed', subtitle: fallbackPreview };
+    }
+    const details = [imageArtifact?.provider, imageArtifact?.size]
+      .filter(Boolean)
+      .join(' · ');
+    return {
+      title: 'Generated image',
+      subtitle: details || imageArtifact?.prompt || fallbackPreview,
+    };
+  }
+
+  const toolName =
+    typeof toolCall.tool === 'string' ? toolCall.tool : toArgString(toolCall.tool);
+  return { title: toolName || 'tool', subtitle: fallbackPreview };
 }
