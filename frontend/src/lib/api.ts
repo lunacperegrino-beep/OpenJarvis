@@ -33,12 +33,27 @@ export async function initApiBase(): Promise<void> {
 
 const DESKTOP_API_FALLBACK = 'http://127.0.0.1:8000';
 
+const normalizeLocalApiUrl = (url: string): string => {
+  const trimmed = url.trim().replace(/\/+$/, '');
+  if (!trimmed) return '';
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.hostname === 'localhost' || parsed.hostname === '::1') {
+      parsed.hostname = '127.0.0.1';
+      return parsed.toString().replace(/\/+$/, '');
+    }
+  } catch {
+    return trimmed;
+  }
+  return trimmed;
+};
+
 const getSettingsApiUrl = (): string => {
   try {
     const raw = localStorage.getItem('openjarvis-settings');
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (parsed.apiUrl) return parsed.apiUrl.replace(/\/+$/, '');
+      if (parsed.apiUrl) return normalizeLocalApiUrl(parsed.apiUrl);
     }
   } catch {}
   return '';
@@ -47,8 +62,8 @@ const getSettingsApiUrl = (): string => {
 export const getBase = (): string => {
   const settingsUrl = getSettingsApiUrl();
   if (settingsUrl) return settingsUrl;
-  if (import.meta.env.VITE_API_URL) return import.meta.env.VITE_API_URL;
-  if (isTauri()) return _tauriApiBase || DESKTOP_API_FALLBACK;
+  if (import.meta.env.VITE_API_URL) return normalizeLocalApiUrl(import.meta.env.VITE_API_URL);
+  if (isTauri()) return normalizeLocalApiUrl(_tauriApiBase || DESKTOP_API_FALLBACK);
   return '';
 };
 

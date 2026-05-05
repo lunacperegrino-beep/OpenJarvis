@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 logger = logging.getLogger(__name__)
 
@@ -763,7 +764,12 @@ async def transcribe_speech(request: Request):
     ext = filename.rsplit(".", 1)[-1] if "." in filename else "wav"
 
     try:
-        result = backend.transcribe(audio_bytes, format=ext, language=language or None)
+        result = await run_in_threadpool(
+            backend.transcribe,
+            audio_bytes,
+            format=ext,
+            language=language or None,
+        )
     except Exception as exc:
         logger.exception("Speech transcription failed")
         raise HTTPException(

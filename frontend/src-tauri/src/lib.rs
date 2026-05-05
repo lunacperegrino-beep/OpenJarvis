@@ -1010,6 +1010,16 @@ fn api_base() -> String {
     format!("http://127.0.0.1:{}", JARVIS_PORT)
 }
 
+fn resolve_api_base(api_url: &str) -> String {
+    let base = if api_url.trim().is_empty() {
+        api_base()
+    } else {
+        api_url.trim().trim_end_matches('/').to_string()
+    };
+    base.replace("://localhost", "://127.0.0.1")
+        .replace("://[::1]", "://127.0.0.1")
+}
+
 fn readiness_item(id: &str, label: &str, state: &str, detail: impl Into<String>) -> ReadinessItem {
     ReadinessItem {
         id: id.into(),
@@ -1102,11 +1112,7 @@ async fn check_runtime_readiness(
     api_url: String,
     selected_model: String,
 ) -> Result<RuntimeReadiness, String> {
-    let base = if api_url.is_empty() {
-        api_base()
-    } else {
-        api_url.trim_end_matches('/').to_string()
-    };
+    let base = resolve_api_base(&api_url);
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(2))
         .build()
@@ -1352,14 +1358,7 @@ async fn stop_backend(backend: tauri::State<'_, SharedBackend>) -> Result<(), St
 
 #[tauri::command]
 async fn check_health(api_url: String) -> Result<serde_json::Value, String> {
-    let url = format!(
-        "{}/health",
-        if api_url.is_empty() {
-            api_base()
-        } else {
-            api_url
-        }
-    );
+    let url = format!("{}/health", resolve_api_base(&api_url));
     let resp = reqwest::get(&url)
         .await
         .map_err(|e| format!("Connection failed: {}", e))?;
@@ -1566,11 +1565,7 @@ async fn transcribe_audio(
     audio_data: Vec<u8>,
     filename: String,
 ) -> Result<serde_json::Value, String> {
-    let base = if api_url.is_empty() {
-        api_base()
-    } else {
-        api_url.trim_end_matches('/').to_string()
-    };
+    let base = resolve_api_base(&api_url);
     let url = format!("{}/v1/speech/transcribe", base);
     let client = reqwest::Client::new();
 
@@ -1653,11 +1648,7 @@ async fn transcribe_audio_file(api_url: String, path: String) -> Result<serde_js
     let audio_data = tokio::fs::read(&audio_path)
         .await
         .map_err(|e| format!("Failed to read audio file: {}", e))?;
-    let base = if api_url.is_empty() {
-        api_base()
-    } else {
-        api_url
-    };
+    let base = resolve_api_base(&api_url);
     let url = format!("{}/v1/speech/transcribe", base);
     let client = reqwest::Client::new();
 
@@ -1831,7 +1822,7 @@ async fn delete_ollama_model(model_name: String) -> Result<serde_json::Value, St
 /// Check speech backend health.
 #[tauri::command]
 async fn speech_health(api_url: String) -> Result<serde_json::Value, String> {
-    let url = format!("{}/v1/speech/health", api_url);
+    let url = format!("{}/v1/speech/health", resolve_api_base(&api_url));
     let resp = reqwest::get(&url)
         .await
         .map_err(|e| format!("Connection failed: {}", e))?;
