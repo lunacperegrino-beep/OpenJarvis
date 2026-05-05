@@ -1,5 +1,6 @@
 """Tests for speech API endpoints."""
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -34,6 +35,14 @@ def app_with_speech(mock_speech_backend):
 
     app = FastAPI()
     app.state.speech_backend = mock_speech_backend
+    app.state.config = SimpleNamespace(
+        speech=SimpleNamespace(
+            language="",
+            model="base",
+            device="auto",
+            compute_type="int8",
+        )
+    )
     app.include_router(speech_router)
     return app
 
@@ -54,6 +63,43 @@ def test_transcribe_endpoint(client, mock_speech_backend):
     assert data["language"] == "en"
     assert data["confidence"] == 0.95
     assert data["duration_seconds"] == 1.5
+    mock_speech_backend.transcribe.assert_called_once_with(
+        b"fake audio data",
+        format="wav",
+        language=None,
+    )
+
+
+def test_transcribe_uses_configured_language(mock_speech_backend):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from openjarvis.server.api_routes import speech_router
+
+    app = FastAPI()
+    app.state.speech_backend = mock_speech_backend
+    app.state.config = SimpleNamespace(
+        speech=SimpleNamespace(
+            language="pt",
+            model="large-v3-turbo",
+            device="auto",
+            compute_type="int8",
+        )
+    )
+    app.include_router(speech_router)
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/speech/transcribe",
+        files={"file": ("test.wav", b"fake audio data", "audio/wav")},
+    )
+
+    assert response.status_code == 200
+    mock_speech_backend.transcribe.assert_called_once_with(
+        b"fake audio data",
+        format="wav",
+        language="pt",
+    )
 
 
 def test_transcribe_no_file(client):
@@ -67,6 +113,8 @@ def test_health_endpoint(client):
     data = response.json()
     assert data["available"] is True
     assert data["backend"] == "mock"
+    assert data["model"] == "base"
+    assert data["language"] == ""
 
 
 def test_health_no_backend():

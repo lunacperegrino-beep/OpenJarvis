@@ -744,6 +744,11 @@ async def learning_policy(request: Request):
 speech_router = APIRouter(prefix="/v1/speech", tags=["speech"])
 
 
+def _speech_attr(backend: Any, name: str, default: Any = None) -> Any:
+    value = getattr(backend, name, None)
+    return value if isinstance(value, str) and value else default
+
+
 @speech_router.post("/transcribe")
 async def transcribe_speech(request: Request):
     """Transcribe uploaded audio to text."""
@@ -757,7 +762,11 @@ async def transcribe_speech(request: Request):
         raise HTTPException(status_code=400, detail="Missing 'file' field")
 
     audio_bytes = await audio_file.read()
-    language = form.get("language")
+    language = str(form.get("language") or "").strip()
+    if not language:
+        config = getattr(request.app.state, "config", None)
+        speech_config = getattr(config, "speech", None)
+        language = str(getattr(speech_config, "language", "") or "").strip()
 
     # Detect format from filename
     filename = getattr(audio_file, "filename", "audio.wav")
@@ -791,9 +800,27 @@ async def speech_health(request: Request):
     backend = getattr(request.app.state, "speech_backend", None)
     if backend is None:
         return {"available": False, "reason": "No speech backend configured"}
+    config = getattr(request.app.state, "config", None)
+    speech_config = getattr(config, "speech", None)
     return {
         "available": backend.health(),
         "backend": backend.backend_id,
+        "model": _speech_attr(
+            backend,
+            "_model_size",
+            getattr(speech_config, "model", None),
+        ),
+        "language": getattr(speech_config, "language", ""),
+        "device": _speech_attr(
+            backend,
+            "_device",
+            getattr(speech_config, "device", None),
+        ),
+        "compute_type": _speech_attr(
+            backend,
+            "_compute_type",
+            getattr(speech_config, "compute_type", None),
+        ),
     }
 
 
