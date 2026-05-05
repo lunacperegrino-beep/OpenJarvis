@@ -749,6 +749,13 @@ def _speech_attr(backend: Any, name: str, default: Any = None) -> Any:
     return value if isinstance(value, str) and value else default
 
 
+def _normalize_speech_language(language: Any) -> str:
+    value = str(language or "").strip()
+    if value.lower() in {"auto", "autodetect", "auto-detect", "detect"}:
+        return ""
+    return value
+
+
 @speech_router.post("/transcribe")
 async def transcribe_speech(request: Request):
     """Transcribe uploaded audio to text."""
@@ -762,11 +769,11 @@ async def transcribe_speech(request: Request):
         raise HTTPException(status_code=400, detail="Missing 'file' field")
 
     audio_bytes = await audio_file.read()
-    language = str(form.get("language") or "").strip()
+    language = _normalize_speech_language(form.get("language"))
     if not language:
         config = getattr(request.app.state, "config", None)
         speech_config = getattr(config, "speech", None)
-        language = str(getattr(speech_config, "language", "") or "").strip()
+        language = _normalize_speech_language(getattr(speech_config, "language", ""))
 
     # Detect format from filename
     filename = getattr(audio_file, "filename", "audio.wav")

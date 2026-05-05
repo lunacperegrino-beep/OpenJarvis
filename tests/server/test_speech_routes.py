@@ -102,6 +102,38 @@ def test_transcribe_uses_configured_language(mock_speech_backend):
     )
 
 
+def test_transcribe_treats_auto_language_as_detection(mock_speech_backend):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from openjarvis.server.api_routes import speech_router
+
+    app = FastAPI()
+    app.state.speech_backend = mock_speech_backend
+    app.state.config = SimpleNamespace(
+        speech=SimpleNamespace(
+            language="auto",
+            model="large-v3-turbo",
+            device="auto",
+            compute_type="int8",
+        )
+    )
+    app.include_router(speech_router)
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/speech/transcribe",
+        files={"file": ("test.wav", b"fake audio data", "audio/wav")},
+    )
+
+    assert response.status_code == 200
+    mock_speech_backend.transcribe.assert_called_once_with(
+        b"fake audio data",
+        format="wav",
+        language=None,
+    )
+
+
 def test_transcribe_no_file(client):
     response = client.post("/v1/speech/transcribe")
     assert response.status_code == 400 or response.status_code == 422
