@@ -51,6 +51,39 @@ def test_faster_whisper_transcribe():
         assert result.text == "Hello world"
         assert result.language == "en"
         assert result.duration_seconds == 1.5
+        mock_model.transcribe.assert_called_once_with(
+            mock_model.transcribe.call_args.args[0],
+            condition_on_previous_text=False,
+            language_detection_segments=5,
+            multilingual=True,
+            vad_filter=True,
+        )
+
+
+def test_faster_whisper_transcribe_passes_language():
+    """Configured language is passed through with robust defaults."""
+    mock_model = MagicMock()
+    mock_info = MagicMock()
+    mock_info.language = "pt"
+    mock_info.language_probability = 1
+    mock_info.duration = 1.5
+    mock_model.transcribe.return_value = ([], mock_info)
+
+    with patch(
+        "openjarvis.speech.faster_whisper.WhisperModel",
+        return_value=mock_model,
+    ):
+        from openjarvis.speech.faster_whisper import FasterWhisperBackend
+
+        backend = FasterWhisperBackend(model_size="base", device="cpu")
+        backend.transcribe(b"fake audio bytes", language="pt")
+
+        mock_model.transcribe.assert_called_once_with(
+            mock_model.transcribe.call_args.args[0],
+            condition_on_previous_text=False,
+            vad_filter=True,
+            language="pt",
+        )
 
 
 def test_faster_whisper_health_no_model():

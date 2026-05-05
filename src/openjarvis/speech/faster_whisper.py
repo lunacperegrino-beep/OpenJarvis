@@ -62,9 +62,15 @@ class FasterWhisperBackend(SpeechBackend):
             tmp.write(audio)
             tmp.flush()
 
-            kwargs = {}
+            kwargs = {
+                "condition_on_previous_text": False,
+                "vad_filter": True,
+            }
             if language:
                 kwargs["language"] = language
+            else:
+                kwargs["language_detection_segments"] = 5
+                kwargs["multilingual"] = True
 
             segments_iter, info = model.transcribe(tmp.name, **kwargs)
             segments_list = list(segments_iter)
