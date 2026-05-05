@@ -1229,6 +1229,66 @@ async fn check_runtime_readiness(
     }
 
     match client
+        .get(format!("{}/v1/speech/health", base))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
+            Ok(body) => {
+                let available = body
+                    .get("available")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
+                let backend = body
+                    .get("backend")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("not configured");
+                let reason = body
+                    .get("reason")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                let detail = if available {
+                    format!("{} ready", backend)
+                } else if reason.is_empty() {
+                    format!("{} unavailable", backend)
+                } else {
+                    reason.to_string()
+                };
+                items.push(readiness_item(
+                    "speech",
+                    "Speech",
+                    if available { "ready" } else { "warning" },
+                    detail,
+                ));
+            }
+            Err(e) => {
+                items.push(readiness_item(
+                    "speech",
+                    "Speech",
+                    "warning",
+                    format!("Health response was invalid: {}", e),
+                ));
+            }
+        },
+        Ok(resp) => {
+            items.push(readiness_item(
+                "speech",
+                "Speech",
+                "warning",
+                format!("Health returned {}", resp.status()),
+            ));
+        }
+        Err(e) => {
+            items.push(readiness_item(
+                "speech",
+                "Speech",
+                "warning",
+                format!("Cannot inspect speech backend: {}", e),
+            ));
+        }
+    }
+
+    match client
         .get("http://127.0.0.1:7860/sdapi/v1/options")
         .send()
         .await
@@ -1506,12 +1566,18 @@ async fn transcribe_audio(
     audio_data: Vec<u8>,
     filename: String,
 ) -> Result<serde_json::Value, String> {
-    let url = format!("{}/v1/speech/transcribe", api_url);
+    let base = if api_url.is_empty() {
+        api_base()
+    } else {
+        api_url.trim_end_matches('/').to_string()
+    };
+    let url = format!("{}/v1/speech/transcribe", base);
     let client = reqwest::Client::new();
 
+    let mime_type = audio_mime_for_path(std::path::Path::new(&filename));
     let part = reqwest::multipart::Part::bytes(audio_data)
         .file_name(filename)
-        .mime_str("audio/webm")
+        .mime_str(mime_type)
         .map_err(|e| format!("Failed to create multipart: {}", e))?;
 
     let form = reqwest::multipart::Form::new().part("file", part);
@@ -1522,6 +1588,11 @@ async fn transcribe_audio(
         .send()
         .await
         .map_err(|e| format!("Connection failed: {}", e))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Transcription failed with {}: {}", status, body));
+    }
     let body: serde_json::Value = resp
         .json()
         .await

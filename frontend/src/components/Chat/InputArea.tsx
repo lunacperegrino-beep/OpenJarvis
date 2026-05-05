@@ -105,6 +105,64 @@ export function InputArea() {
     toast.success('Image attached');
   }, []);
 
+  const transcribeAudioIntoLastAssistant = useCallback(async (
+    convId: string,
+    attachments: ChatAttachment[],
+    sources: Map<string, string | File> = new Map(),
+  ) => {
+    const startTime = Date.now();
+    const timer = setInterval(() => {
+      setStreamState({ elapsedMs: Date.now() - startTime });
+    }, 100);
+    timerRef.current = timer;
+    setUploadingAudio(true);
+    setStreamState({
+      isStreaming: true,
+      phase: 'Transcribing audio...',
+      elapsedMs: 0,
+      activeToolCalls: [],
+      content: '',
+    });
+
+    try {
+      const transcripts: string[] = [];
+
+      for (const attachment of attachments) {
+        const result = await transcribeAttachment(attachment, sources.get(attachment.id));
+        const transcript = result.text?.trim() || '(No speech detected.)';
+        transcripts.push(`Transcript for **${attachment.name}**\n\n${transcript}`);
+      }
+
+      updateLastAssistant(convId, transcripts.join('\n\n---\n\n'));
+      useAppStore.getState().addLogEntry({
+        timestamp: Date.now(),
+        level: 'info',
+        category: 'chat',
+        message: `Transcribed audio: ${attachments.map((attachment) => attachment.name).join(', ')}`,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      updateLastAssistant(
+        convId,
+        `Audio transcription failed.\n\n${message}`,
+      );
+      toast.error('Audio transcription failed');
+      useAppStore.getState().addLogEntry({
+        timestamp: Date.now(),
+        level: 'error',
+        category: 'chat',
+        message: `Audio transcription failed: ${message}`,
+      });
+    } finally {
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+      setUploadingAudio(false);
+      resetStream();
+    }
+  }, [resetStream, setStreamState, updateLastAssistant]);
+
   const transcribeSelectedAudio = useCallback(async (
     attachment: ChatAttachment,
     source: string | File,
@@ -133,57 +191,11 @@ export function InputArea() {
     };
     addMessage(convId, assistantMsg);
 
-    const startTime = Date.now();
-    const timer = setInterval(() => {
-      setStreamState({ elapsedMs: Date.now() - startTime });
-    }, 100);
-    timerRef.current = timer;
-    setUploadingAudio(true);
-    setStreamState({
-      isStreaming: true,
-      phase: 'Transcribing audio...',
-      elapsedMs: 0,
-      activeToolCalls: [],
-      content: '',
-    });
-
-    try {
-      const result =
-        typeof source === 'string'
-          ? await transcribeAudioFile(source)
-          : await transcribeAudio(source, source.name);
-      const transcript = result.text?.trim() || '(No speech detected.)';
-      updateLastAssistant(
-        convId,
-        `Transcript for **${attachment.name}**\n\n${transcript}`,
-      );
-      useAppStore.getState().addLogEntry({
-        timestamp: Date.now(),
-        level: 'info',
-        category: 'chat',
-        message: `Transcribed audio: ${attachment.name}`,
-      });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      updateLastAssistant(
-        convId,
-        `Audio transcription failed for **${attachment.name}**.\n\n${message}`,
-      );
-      toast.error('Audio transcription failed');
-      useAppStore.getState().addLogEntry({
-        timestamp: Date.now(),
-        level: 'error',
-        category: 'chat',
-        message: `Audio transcription failed: ${message}`,
-      });
-    } finally {
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-        timerRef.current = null;
-      }
-      setUploadingAudio(false);
-      resetStream();
-    }
+    await transcribeAudioIntoLastAssistant(
+      convId,
+      [attachment],
+      new Map([[attachment.id, source]]),
+    );
   }, [
     activeId,
     selectedModel,
@@ -191,9 +203,7 @@ export function InputArea() {
     uploadingAudio,
     createConversation,
     addMessage,
-    updateLastAssistant,
-    setStreamState,
-    resetStream,
+    transcribeAudioIntoLastAssistant,
   ]);
 
   const handlePickImage = useCallback(async () => {
@@ -372,6 +382,19 @@ export function InputArea() {
       attachments: attachments.length > 0 ? attachments : undefined,
     };
     addMessage(convId, userMsg);
+
+    const audioAttachments = attachments.filter((attachment) => attachment.kind === 'audio');
+    if (audioAttachments.length > 0) {
+      const assistantMsg: ChatMessage = {
+        id: generateId(),
+        role: 'assistant',
+        content: 'Transcribing audio...',
+        timestamp: Date.now(),
+      };
+      addMessage(convId, assistantMsg);
+      await transcribeAudioIntoLastAssistant(convId, audioAttachments);
+      return;
+    }
 
     if (isImageOnlyUpload) {
       const assistantMsg: ChatMessage = {
@@ -589,6 +612,7 @@ export function InputArea() {
     createConversation,
     addMessage,
     updateLastAssistant,
+    transcribeAudioIntoLastAssistant,
     setStreamState,
     resetStream,
     temperature,
@@ -938,14 +962,50 @@ function formatAttachmentOnlyMessage(attachments: ChatAttachment[]): string {
 
 function buildApiMessageContent(content: string, attachments?: ChatAttachment[]): string {
   if (!attachments?.length) return content;
-  const attachmentNotes = attachments.map((attachment) => {
+  const attachmentNotes = attachments.flatMap((attachment) => {
     const location = attachment.path || attachment.url || attachment.name;
     if (attachment.kind === 'image') {
-      return `[Attached image: ${attachment.name}. Location: ${location}. Visual analysis is not supported in this desktop build yet.]`;
+      return [
+        `[Attached image: ${attachment.name}. Location: ${location}. Visual analysis is not supported in this desktop build yet.]`,
+      ];
     }
-    return `[Attached audio: ${attachment.name}. Location: ${location}.]`;
+    return [];
   });
   return [content, ...attachmentNotes].filter(Boolean).join('\n\n');
+}
+
+async function transcribeAttachment(
+  attachment: ChatAttachment,
+  source?: string | File,
+) {
+  if (source instanceof File) {
+    return transcribeAudio(source, source.name || attachment.name);
+  }
+
+  if (typeof source === 'string') {
+    if (source.startsWith('blob:') || source.startsWith('data:')) {
+      const blob = await fetch(source).then((response) => {
+        if (!response.ok) throw new Error(`Could not read audio attachment: ${response.status}`);
+        return response.blob();
+      });
+      return transcribeAudio(blob, attachment.name);
+    }
+    return transcribeAudioFile(source);
+  }
+
+  if (attachment.path) {
+    return transcribeAudioFile(attachment.path);
+  }
+
+  if (attachment.url) {
+    const blob = await fetch(attachment.url).then((response) => {
+      if (!response.ok) throw new Error(`Could not read audio attachment: ${response.status}`);
+      return response.blob();
+    });
+    return transcribeAudio(blob, attachment.name);
+  }
+
+  throw new Error(`No readable audio source found for ${attachment.name}.`);
 }
 
 function readFileAsDataUrl(file: File): Promise<string> {

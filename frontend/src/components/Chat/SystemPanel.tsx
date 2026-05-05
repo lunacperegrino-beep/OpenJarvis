@@ -16,6 +16,7 @@ import {
   Cpu,
   FolderCheck,
   Image as ImageIcon,
+  Mic,
   RefreshCw,
   Server,
 } from 'lucide-react';
@@ -377,6 +378,7 @@ function ReadinessRow({ item }: { item: RuntimeReadinessItem }) {
     backend: Server,
     ollama: Cpu,
     model: Bot,
+    speech: Mic,
     drawthings: ImageIcon,
     permissions: FolderCheck,
   };

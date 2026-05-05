@@ -253,6 +253,26 @@ export async function fetchRuntimeReadiness(selectedModel: string): Promise<Runt
     });
   }
 
+  try {
+    const res = await fetch(`${base}/v1/speech/health`);
+    const data = res.ok ? await res.json() : null;
+    const available = Boolean(data?.available);
+    const backend = data?.backend || 'not configured';
+    items.push({
+      id: 'speech',
+      label: 'Speech',
+      state: available ? 'ready' : 'warning',
+      detail: available ? `${backend} ready` : data?.reason || `${backend} unavailable`,
+    });
+  } catch {
+    items.push({
+      id: 'speech',
+      label: 'Speech',
+      state: 'unknown',
+      detail: 'Could not inspect speech backend',
+    });
+  }
+
   items.push({
     id: 'drawthings',
     label: 'Draw Things',
