@@ -43,6 +43,36 @@ def test_auto_discovery_priority():
     """Auto mode tries backends in priority order."""
     from openjarvis.speech._discovery import DISCOVERY_ORDER
 
-    assert DISCOVERY_ORDER[0] == "faster-whisper"
+    assert DISCOVERY_ORDER[0] in {"mlx-whisper", "faster-whisper"}
+    if "mlx-whisper" in DISCOVERY_ORDER:
+        assert DISCOVERY_ORDER.index("mlx-whisper") < DISCOVERY_ORDER.index("faster-whisper")
+    assert "faster-whisper" in DISCOVERY_ORDER
     assert "openai" in DISCOVERY_ORDER
     assert "deepgram" in DISCOVERY_ORDER
+
+
+def test_auto_discovery_skips_unhealthy_backends():
+    """Auto mode skips a created backend when health() is false."""
+    from openjarvis.speech._discovery import get_speech_backend
+
+    config = JarvisConfig()
+    config.speech.backend = "auto"
+
+    unhealthy = type(
+        "UnhealthyBackend",
+        (),
+        {"backend_id": "mlx-whisper", "health": lambda self: False},
+    )()
+    healthy = type(
+        "HealthyBackend",
+        (),
+        {"backend_id": "faster-whisper", "health": lambda self: True},
+    )()
+
+    with patch(
+        "openjarvis.speech._discovery._create_backend",
+        side_effect=[unhealthy, healthy],
+    ):
+        result = get_speech_backend(config)
+
+    assert result is healthy

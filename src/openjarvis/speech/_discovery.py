@@ -3,18 +3,18 @@
 from __future__ import annotations
 
 import os
+import platform
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from openjarvis.core.config import JarvisConfig
     from openjarvis.speech._stubs import SpeechBackend
 
-# Priority order: local first, then cloud
-DISCOVERY_ORDER = [
-    "faster-whisper",
-    "openai",
-    "deepgram",
-]
+if platform.system() == "Darwin" and platform.machine() == "arm64":
+    # Prefer Apple's MLX/Metal path on Apple Silicon when available.
+    DISCOVERY_ORDER = ["mlx-whisper", "faster-whisper", "openai", "deepgram"]
+else:
+    DISCOVERY_ORDER = ["faster-whisper", "openai", "deepgram"]
 
 
 def _create_backend(
@@ -30,7 +30,9 @@ def _create_backend(
     try:
         backend_cls = SpeechRegistry.get(key)
 
-        if key == "faster-whisper":
+        if key == "mlx-whisper":
+            return backend_cls(model_size=config.speech.model)
+        elif key == "faster-whisper":
             return backend_cls(
                 model_size=config.speech.model,
                 device=config.speech.device,
@@ -69,7 +71,7 @@ def get_speech_backend(config: "JarvisConfig") -> Optional["SpeechBackend"]:
     # Auto-discovery: try each in priority order
     for key in DISCOVERY_ORDER:
         backend = _create_backend(key, config)
-        if backend is not None:
+        if backend is not None and backend.health():
             return backend
 
     return None
