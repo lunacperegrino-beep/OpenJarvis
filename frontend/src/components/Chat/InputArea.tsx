@@ -412,10 +412,7 @@ export function InputArea() {
 
     // Build API messages before adding assistant placeholder
     const currentMessages = useAppStore.getState().messages;
-    const apiMessages = currentMessages.map((m) => ({
-      role: m.role,
-      content: buildApiMessageContent(m.content, m.attachments),
-    }));
+    const apiMessages = buildApiMessages(currentMessages);
 
     const assistantMsg: ChatMessage = {
       id: generateId(),
@@ -972,6 +969,100 @@ function buildApiMessageContent(content: string, attachments?: ChatAttachment[])
     return [];
   });
   return [content, ...attachmentNotes].filter(Boolean).join('\n\n');
+}
+
+interface TranscriptArtifact {
+  index: number;
+  content: string;
+}
+
+function buildApiMessages(messages: ChatMessage[]): Array<{ role: string; content: string }> {
+  const lastUserIndex = findLastUserIndex(messages);
+  const lastUser = lastUserIndex >= 0 ? messages[lastUserIndex] : null;
+  const transcript =
+    lastUser && shouldAttachRecentTranscript(lastUser.content)
+      ? findRecentTranscriptArtifact(messages, lastUserIndex)
+      : null;
+
+  return messages.map((message, index) => {
+    let content = buildApiMessageContent(message.content, message.attachments);
+
+    if (transcript && index === transcript.index) {
+      content = (
+        '[Transcript artifact generated earlier in this conversation. ' +
+        'The full transcript is attached to the latest user request.]'
+      );
+    }
+
+    if (transcript && index === lastUserIndex) {
+      content = attachTranscriptToUserRequest(content, transcript.content);
+    }
+
+    return { role: message.role, content };
+  });
+}
+
+function findLastUserIndex(messages: ChatMessage[]): number {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].role === 'user') return index;
+  }
+  return -1;
+}
+
+function findRecentTranscriptArtifact(
+  messages: ChatMessage[],
+  beforeIndex: number,
+): TranscriptArtifact | null {
+  for (let index = beforeIndex - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role === 'assistant' && isTranscriptArtifact(message.content)) {
+      return { index, content: message.content };
+    }
+  }
+  return null;
+}
+
+function isTranscriptArtifact(content: string): boolean {
+  return /^Transcript for \*\*.+?\*\*/m.test(content.trim());
+}
+
+function shouldAttachRecentTranscript(content: string): boolean {
+  const normalized = content
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+
+  return [
+    'transcri',
+    'transcript',
+    'format',
+    'speaker',
+    'orador',
+    'separ',
+    'organ',
+    'resum',
+    'summar',
+    'corrig',
+    'above',
+    'acima',
+    'texto',
+    'this',
+    'isso',
+  ].some((term) => normalized.includes(term));
+}
+
+function attachTranscriptToUserRequest(request: string, transcript: string): string {
+  return [
+    request,
+    (
+      'Use the transcript below as the source text for this request. ' +
+      'It was generated earlier in this same chat and is available context. ' +
+      'Do not ask me to paste it again.'
+    ),
+    '--- BEGIN RECENT TRANSCRIPT ---',
+    transcript,
+    '--- END RECENT TRANSCRIPT ---',
+  ].join('\n\n');
 }
 
 async function transcribeAttachment(
