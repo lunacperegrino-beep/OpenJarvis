@@ -1,22 +1,29 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { Send, Square, Paperclip } from 'lucide-react';
+import type { ReactNode } from 'react';
+import { Send, Square, Paperclip, FileAudio, Image as ImageIcon, X, Loader2 } from 'lucide-react';
+import { toast } from 'sonner';
 import { useAppStore, generateId } from '../../lib/store';
 import { streamChat } from '../../lib/sse';
-import { fetchSavings, getBase } from '../../lib/api';
+import { fetchSavings, getBase, isTauri, transcribeAudio, transcribeAudioFile } from '../../lib/api';
 import { MicButton } from './MicButton';
+import { AttachmentCard } from './AttachmentCard';
 import { useSpeech } from '../../hooks/useSpeech';
-import type { ChatMessage, ToolCallInfo, TokenUsage, MessageTelemetry } from '../../types';
+import type { ChatAttachment, ChatMessage, ToolCallInfo, TokenUsage, MessageTelemetry } from '../../types';
 
 export function InputArea() {
   const [input, setInput] = useState('');
+  const [pendingAttachments, setPendingAttachments] = useState<ChatAttachment[]>([]);
+  const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
+  const [uploadingAudio, setUploadingAudio] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const audioInputRef = useRef<HTMLInputElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const activeId = useAppStore((s) => s.activeId);
   const selectedModel = useAppStore((s) => s.selectedModel);
   const streamState = useAppStore((s) => s.streamState);
-  const messages = useAppStore((s) => s.messages);
   const speechEnabled = useAppStore((s) => s.settings.speechEnabled);
   const maxTokens = useAppStore((s) => s.settings.maxTokens);
   const temperature = useAppStore((s) => s.settings.temperature);
@@ -83,11 +90,22 @@ export function InputArea() {
     resetStream();
   }, [resetStream]);
 
-  const sendMessage = useCallback(async (overrideContent?: string) => {
-    const content = (overrideContent ?? input).trim();
-    if (!content || streamState.isStreaming) return;
+  const addPendingImage = useCallback((attachment: ChatAttachment) => {
+    setPendingAttachments((prev) => {
+      if (prev.some((item) => item.path === attachment.path && item.url === attachment.url)) {
+        return prev;
+      }
+      return [...prev, attachment].slice(-4);
+    });
+    setAttachmentMenuOpen(false);
+    toast.success('Image attached');
+  }, []);
 
-    setInput('');
+  const transcribeSelectedAudio = useCallback(async (
+    attachment: ChatAttachment,
+    source: string | File,
+  ) => {
+    if (streamState.isStreaming || uploadingAudio) return;
 
     let convId = activeId;
     if (!convId) {
@@ -97,16 +115,201 @@ export function InputArea() {
     const userMsg: ChatMessage = {
       id: generateId(),
       role: 'user',
-      content,
+      content: `Transcribe audio: ${attachment.name}`,
       timestamp: Date.now(),
+      attachments: [attachment],
     };
     addMessage(convId, userMsg);
+
+    const assistantMsg: ChatMessage = {
+      id: generateId(),
+      role: 'assistant',
+      content: 'Transcribing audio...',
+      timestamp: Date.now(),
+    };
+    addMessage(convId, assistantMsg);
+
+    const startTime = Date.now();
+    const timer = setInterval(() => {
+      setStreamState({ elapsedMs: Date.now() - startTime });
+    }, 100);
+    timerRef.current = timer;
+    setUploadingAudio(true);
+    setStreamState({
+      isStreaming: true,
+      phase: 'Transcribing audio...',
+      elapsedMs: 0,
+      activeToolCalls: [],
+      content: '',
+    });
+
+    try {
+      const result =
+        typeof source === 'string'
+          ? await transcribeAudioFile(source)
+          : await transcribeAudio(source, source.name);
+      const transcript = result.text?.trim() || '(No speech detected.)';
+      updateLastAssistant(
+        convId,
+        `Transcript for **${attachment.name}**\n\n${transcript}`,
+      );
+      useAppStore.getState().addLogEntry({
+        timestamp: Date.now(),
+        level: 'info',
+        category: 'chat',
+        message: `Transcribed audio: ${attachment.name}`,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      updateLastAssistant(
+        convId,
+        `Audio transcription failed for **${attachment.name}**.\n\n${message}`,
+      );
+      toast.error('Audio transcription failed');
+      useAppStore.getState().addLogEntry({
+        timestamp: Date.now(),
+        level: 'error',
+        category: 'chat',
+        message: `Audio transcription failed: ${message}`,
+      });
+    } finally {
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+      setUploadingAudio(false);
+      resetStream();
+    }
+  }, [
+    activeId,
+    selectedModel,
+    streamState.isStreaming,
+    uploadingAudio,
+    createConversation,
+    addMessage,
+    updateLastAssistant,
+    setStreamState,
+    resetStream,
+  ]);
+
+  const handlePickImage = useCallback(async () => {
+    if (streamState.isStreaming || modelLoading) return;
+    if (isTauri()) {
+      const path = await pickDesktopAttachment('image');
+      if (!path) return;
+      addPendingImage({
+        id: generateId(),
+        kind: 'image',
+        name: basename(path),
+        path,
+      });
+      return;
+    }
+    imageInputRef.current?.click();
+  }, [addPendingImage, modelLoading, streamState.isStreaming]);
+
+  const handlePickAudio = useCallback(async () => {
+    if (streamState.isStreaming || modelLoading || uploadingAudio) return;
+    setAttachmentMenuOpen(false);
+    if (isTauri()) {
+      const path = await pickDesktopAttachment('audio');
+      if (!path) return;
+      await transcribeSelectedAudio(
+        {
+          id: generateId(),
+          kind: 'audio',
+          name: basename(path),
+          path,
+        },
+        path,
+      );
+      return;
+    }
+    audioInputRef.current?.click();
+  }, [modelLoading, streamState.isStreaming, transcribeSelectedAudio, uploadingAudio]);
+
+  const handleBrowserImage = useCallback(async (file: File | null) => {
+    if (!file) return;
+    try {
+      addPendingImage({
+        id: generateId(),
+        kind: 'image',
+        name: file.name,
+        url: await readFileAsDataUrl(file),
+        mimeType: file.type,
+        size: file.size,
+      });
+    } catch {
+      toast.error('Could not load image');
+    }
+  }, [addPendingImage]);
+
+  const handleBrowserAudio = useCallback(async (file: File | null) => {
+    if (!file) return;
+    await transcribeSelectedAudio(
+      {
+        id: generateId(),
+        kind: 'audio',
+        name: file.name,
+        url: URL.createObjectURL(file),
+        mimeType: file.type,
+        size: file.size,
+      },
+      file,
+    );
+  }, [transcribeSelectedAudio]);
+
+  const sendMessage = useCallback(async (
+    overrideContent?: string,
+    overrideAttachments?: ChatAttachment[],
+  ) => {
+    const attachments = overrideAttachments ?? pendingAttachments;
+    const content = (overrideContent ?? input).trim();
+    if ((!content && attachments.length === 0) || streamState.isStreaming) return;
+
+    const isImageOnlyUpload =
+      !content &&
+      attachments.length > 0 &&
+      attachments.every((attachment) => attachment.kind === 'image');
+    const displayContent = content || formatAttachmentOnlyMessage(attachments);
+
+    setInput('');
+    if (!overrideAttachments) setPendingAttachments([]);
+    setAttachmentMenuOpen(false);
+
+    let convId = activeId;
+    if (!convId) {
+      convId = createConversation(selectedModel);
+    }
+
+    const userMsg: ChatMessage = {
+      id: generateId(),
+      role: 'user',
+      content: displayContent,
+      timestamp: Date.now(),
+      attachments: attachments.length > 0 ? attachments : undefined,
+    };
+    addMessage(convId, userMsg);
+
+    if (isImageOnlyUpload) {
+      const assistantMsg: ChatMessage = {
+        id: generateId(),
+        role: 'assistant',
+        content: (
+          'Image uploaded. I can show, open, and reveal the file now. ' +
+          'Full visual analysis is not wired into this desktop build yet, so ask with text or use the file path for local file operations.'
+        ),
+        timestamp: Date.now(),
+      };
+      addMessage(convId, assistantMsg);
+      return;
+    }
 
     // Build API messages before adding assistant placeholder
     const currentMessages = useAppStore.getState().messages;
     const apiMessages = currentMessages.map((m) => ({
       role: m.role,
-      content: m.content,
+      content: buildApiMessageContent(m.content, m.attachments),
     }));
 
     const assistantMsg: ChatMessage = {
@@ -145,7 +348,7 @@ export function InputArea() {
       timestamp: Date.now(),
       level: 'info',
       category: 'chat',
-      message: `Request: "${content.slice(0, 80)}${content.length > 80 ? '...' : ''}" → ${selectedModel}`,
+      message: `Request: "${displayContent.slice(0, 80)}${displayContent.length > 80 ? '...' : ''}" → ${selectedModel}`,
     });
 
     try {
@@ -297,6 +500,7 @@ export function InputArea() {
     }
   }, [
     input,
+    pendingAttachments,
     activeId,
     selectedModel,
     streamState.isStreaming,
@@ -305,6 +509,8 @@ export function InputArea() {
     updateLastAssistant,
     setStreamState,
     resetStream,
+    temperature,
+    maxTokens,
   ]);
 
   useEffect(() => {
@@ -330,14 +536,72 @@ export function InputArea() {
 
   return (
     <div className="px-4 pb-4 pt-2" style={{ maxWidth: 'var(--chat-max-width)', margin: '0 auto', width: '100%' }}>
+      {pendingAttachments.length > 0 && (
+        <div className="mb-2 flex flex-col gap-2">
+          {pendingAttachments.map((attachment) => (
+            <div key={attachment.id} className="relative">
+              <AttachmentCard attachment={attachment} compact />
+              <button
+                type="button"
+                onClick={() => setPendingAttachments((prev) => prev.filter((item) => item.id !== attachment.id))}
+                className="absolute top-1 right-1 p-1 rounded-full cursor-pointer"
+                style={{
+                  background: 'var(--color-bg)',
+                  color: 'var(--color-text-tertiary)',
+                  border: '1px solid var(--color-border)',
+                }}
+                title="Remove attachment"
+              >
+                <X size={12} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
       <div
-        className="flex items-center gap-2 rounded-2xl px-4 py-3 transition-shadow"
+        className="relative flex items-center gap-2 rounded-2xl px-4 py-3 transition-shadow"
         style={{
           background: 'var(--color-input-bg)',
           border: '1px solid var(--color-input-border)',
           boxShadow: 'var(--shadow-sm)',
         }}
       >
+        <div className="relative">
+          <button
+            type="button"
+            onClick={() => setAttachmentMenuOpen((open) => !open)}
+            disabled={streamState.isStreaming || modelLoading || uploadingAudio}
+            className="p-2 rounded-xl transition-colors shrink-0 cursor-pointer disabled:opacity-30 disabled:cursor-default"
+            style={{
+              background: attachmentMenuOpen ? 'var(--color-bg-tertiary)' : 'transparent',
+              color: 'var(--color-text-tertiary)',
+            }}
+            title="Attach file"
+          >
+            {uploadingAudio ? <Loader2 size={16} className="animate-spin" /> : <Paperclip size={16} />}
+          </button>
+          {attachmentMenuOpen && (
+            <div
+              className="absolute bottom-full left-0 mb-2 w-44 rounded-lg overflow-hidden z-20"
+              style={{
+                background: 'var(--color-bg)',
+                border: '1px solid var(--color-border)',
+                boxShadow: 'var(--shadow-md)',
+              }}
+            >
+              <AttachmentMenuButton
+                icon={<FileAudio size={14} />}
+                label="Upload audio"
+                onClick={handlePickAudio}
+              />
+              <AttachmentMenuButton
+                icon={<ImageIcon size={14} />}
+                label="Upload image"
+                onClick={handlePickImage}
+              />
+            </div>
+          )}
+        </div>
         <textarea
           ref={textareaRef}
           value={input}
@@ -368,11 +632,11 @@ export function InputArea() {
             />
             <button
               onClick={() => sendMessage()}
-              disabled={!input.trim() || modelLoading}
+              disabled={(!input.trim() && pendingAttachments.length === 0) || modelLoading}
               className="p-2 rounded-xl transition-colors shrink-0 cursor-pointer disabled:opacity-30 disabled:cursor-default"
               style={{
-                background: input.trim() ? 'var(--color-accent)' : 'var(--color-bg-tertiary)',
-                color: input.trim() ? 'white' : 'var(--color-text-tertiary)',
+                background: input.trim() || pendingAttachments.length > 0 ? 'var(--color-accent)' : 'var(--color-bg-tertiary)',
+                color: input.trim() || pendingAttachments.length > 0 ? 'white' : 'var(--color-text-tertiary)',
               }}
               title="Send message"
             >
@@ -381,6 +645,28 @@ export function InputArea() {
           </div>
         )}
       </div>
+      <input
+        ref={audioInputRef}
+        type="file"
+        accept="audio/*,.m4a,.mp3,.wav,.webm,.flac,.ogg,.aac"
+        className="hidden"
+        onChange={(event) => {
+          const file = event.currentTarget.files?.[0] ?? null;
+          event.currentTarget.value = '';
+          void handleBrowserAudio(file);
+        }}
+      />
+      <input
+        ref={imageInputRef}
+        type="file"
+        accept="image/*,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tif,.tiff"
+        className="hidden"
+        onChange={(event) => {
+          const file = event.currentTarget.files?.[0] ?? null;
+          event.currentTarget.value = '';
+          void handleBrowserImage(file);
+        }}
+      />
       <div className="flex items-center justify-center mt-2 text-[11px]" style={{ color: 'var(--color-text-tertiary)' }}>
         <span>
           <kbd className="font-mono">Enter</kbd> to send &middot;{' '}
@@ -389,4 +675,79 @@ export function InputArea() {
       </div>
     </div>
   );
+}
+
+function AttachmentMenuButton({
+  icon,
+  label,
+  onClick,
+}: {
+  icon: ReactNode;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="w-full flex items-center gap-2 px-3 py-2 text-xs text-left cursor-pointer transition-colors"
+      style={{
+        color: 'var(--color-text-secondary)',
+        background: 'transparent',
+      }}
+      onMouseEnter={(event) => {
+        event.currentTarget.style.background = 'var(--color-bg-secondary)';
+      }}
+      onMouseLeave={(event) => {
+        event.currentTarget.style.background = 'transparent';
+      }}
+    >
+      {icon}
+      <span>{label}</span>
+    </button>
+  );
+}
+
+async function pickDesktopAttachment(kind: 'audio' | 'image'): Promise<string | null> {
+  const { open } = await import('@tauri-apps/plugin-dialog');
+  const selected = await open({
+    multiple: false,
+    filters: [
+      kind === 'audio'
+        ? { name: 'Audio', extensions: ['m4a', 'mp3', 'wav', 'webm', 'flac', 'ogg', 'aac'] }
+        : { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'tif', 'tiff'] },
+    ],
+  });
+  if (Array.isArray(selected)) return selected[0] ?? null;
+  return typeof selected === 'string' ? selected : null;
+}
+
+function basename(path: string): string {
+  return path.split(/[\\/]/).filter(Boolean).pop() || path;
+}
+
+function formatAttachmentOnlyMessage(attachments: ChatAttachment[]): string {
+  if (attachments.length === 1) return `Uploaded ${attachments[0].kind}: ${attachments[0].name}`;
+  return `Uploaded ${attachments.length} attachments`;
+}
+
+function buildApiMessageContent(content: string, attachments?: ChatAttachment[]): string {
+  if (!attachments?.length) return content;
+  const attachmentNotes = attachments.map((attachment) => {
+    const location = attachment.path || attachment.url || attachment.name;
+    if (attachment.kind === 'image') {
+      return `[Attached image: ${attachment.name}. Location: ${location}. Visual analysis is not supported in this desktop build yet.]`;
+    }
+    return `[Attached audio: ${attachment.name}. Location: ${location}.]`;
+  });
+  return [content, ...attachmentNotes].filter(Boolean).join('\n\n');
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
 }

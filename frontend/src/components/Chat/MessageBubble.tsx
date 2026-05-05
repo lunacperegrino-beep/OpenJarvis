@@ -6,6 +6,7 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import 'katex/dist/katex.min.css';
 import { Copy, Check } from 'lucide-react';
+import { AttachmentCard } from './AttachmentCard';
 import { AudioPlayer } from './AudioPlayer';
 import { ToolCallCard } from './ToolCallCard';
 import { XRayFooter } from './XRayFooter';
@@ -136,17 +137,28 @@ export function MessageBubble({ message }: Props) {
   if (isUser) {
     return (
       <div className="flex justify-end mb-4">
-        <div
-          className="max-w-[85%] px-4 py-2.5 text-sm leading-relaxed"
-          style={{
-            background: 'var(--color-user-bubble)',
-            color: 'var(--color-user-bubble-text)',
-            borderRadius: 'var(--radius-xl) var(--radius-xl) var(--radius-sm) var(--radius-xl)',
-            whiteSpace: 'pre-wrap',
-            wordBreak: 'break-word',
-          }}
-        >
-          {message.content}
+        <div className="max-w-[85%] flex flex-col items-end gap-2">
+          {message.attachments && message.attachments.length > 0 && (
+            <div className="flex flex-col gap-2 w-full items-end">
+              {message.attachments.map((attachment) => (
+                <AttachmentCard key={attachment.id} attachment={attachment} compact />
+              ))}
+            </div>
+          )}
+          {message.content && (
+            <div
+              className="px-4 py-2.5 text-sm leading-relaxed"
+              style={{
+                background: 'var(--color-user-bubble)',
+                color: 'var(--color-user-bubble-text)',
+                borderRadius: 'var(--radius-xl) var(--radius-xl) var(--radius-sm) var(--radius-xl)',
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-word',
+              }}
+            >
+              {message.content}
+            </div>
+          )}
         </div>
       </div>
     );

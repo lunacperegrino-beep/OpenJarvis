@@ -64,11 +64,22 @@ export interface MessageTelemetry {
   suggested_max_tokens?: number;
 }
 
+export interface ChatAttachment {
+  id: string;
+  kind: 'image' | 'audio';
+  name: string;
+  path?: string;
+  url?: string;
+  mimeType?: string;
+  size?: number;
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
   content: string;
   timestamp: number;
+  attachments?: ChatAttachment[];
   toolCalls?: ToolCallInfo[];
   usage?: TokenUsage;
   telemetry?: MessageTelemetry;

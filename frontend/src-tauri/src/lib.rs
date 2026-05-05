@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose, Engine as _};
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
@@ -8,6 +9,7 @@ use tokio::sync::Mutex;
 
 const OLLAMA_PORT: u16 = 11434;
 const JARVIS_PORT: u16 = 8000;
+const MAX_ATTACHMENT_PREVIEW_BYTES: u64 = 25 * 1024 * 1024;
 
 /// Small, fast model pulled at startup so the app opens quickly.
 const STARTUP_MODEL: &str = "qwen3.5:4b";
@@ -666,9 +668,12 @@ async fn boot_backend(backend: SharedBackend, status: SharedStatus) {
     let _ = tokio::process::Command::new(&uv_bin)
         .args([
             "sync",
-            "--extra", "server",
-            "--extra", "inference-cloud",
-            "--extra", "inference-google",
+            "--extra",
+            "server",
+            "--extra",
+            "inference-cloud",
+            "--extra",
+            "inference-google",
         ])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -860,6 +865,139 @@ async fn reveal_artifact(path: String) -> Result<(), String> {
         )
         .status()
         .map_err(|e| format!("Failed to reveal artifact: {}", e))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("Reveal command failed with status {}", status))
+    }
+}
+
+fn validate_chat_attachment_path(path: &str) -> Result<std::path::PathBuf, String> {
+    let raw = std::path::PathBuf::from(path);
+    let canonical = raw
+        .canonicalize()
+        .map_err(|e| format!("Could not resolve attachment path: {}", e))?;
+    if !canonical.is_file() {
+        return Err("Attachment path is not a file.".into());
+    }
+
+    let extension = canonical
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let allowed = [
+        "png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "m4a", "mp3", "wav", "webm",
+        "flac", "ogg", "aac",
+    ];
+    if !allowed.contains(&extension.as_str()) {
+        return Err("Only image and audio attachments can be opened from chat.".into());
+    }
+
+    Ok(canonical)
+}
+
+fn attachment_mime_for_path(path: &std::path::Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        "tif" | "tiff" => "image/tiff",
+        "m4a" => "audio/mp4",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "webm" => "audio/webm",
+        "flac" => "audio/flac",
+        "ogg" => "audio/ogg",
+        "aac" => "audio/aac",
+        _ => "application/octet-stream",
+    }
+}
+
+#[tauri::command]
+async fn read_attachment_data_url(path: String) -> Result<String, String> {
+    let attachment = validate_chat_attachment_path(&path)?;
+    let metadata = tokio::fs::metadata(&attachment)
+        .await
+        .map_err(|e| format!("Could not inspect attachment: {}", e))?;
+    if metadata.len() > MAX_ATTACHMENT_PREVIEW_BYTES {
+        return Err("Attachment is too large to preview inline.".into());
+    }
+
+    let data = tokio::fs::read(&attachment)
+        .await
+        .map_err(|e| format!("Failed to read attachment: {}", e))?;
+    let encoded = general_purpose::STANDARD.encode(data);
+    Ok(format!(
+        "data:{};base64,{}",
+        attachment_mime_for_path(&attachment),
+        encoded
+    ))
+}
+
+#[tauri::command]
+async fn open_attachment(path: String) -> Result<(), String> {
+    let attachment = validate_chat_attachment_path(&path)?;
+    #[cfg(target_os = "macos")]
+    let status = std::process::Command::new("open")
+        .arg(&attachment)
+        .status()
+        .map_err(|e| format!("Failed to open attachment: {}", e))?;
+
+    #[cfg(target_os = "windows")]
+    let status = std::process::Command::new("cmd")
+        .args(["/C", "start", ""])
+        .arg(attachment.to_string_lossy().to_string())
+        .status()
+        .map_err(|e| format!("Failed to open attachment: {}", e))?;
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let status = std::process::Command::new("xdg-open")
+        .arg(&attachment)
+        .status()
+        .map_err(|e| format!("Failed to open attachment: {}", e))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("Open command failed with status {}", status))
+    }
+}
+
+#[tauri::command]
+async fn reveal_attachment(path: String) -> Result<(), String> {
+    let attachment = validate_chat_attachment_path(&path)?;
+    #[cfg(target_os = "macos")]
+    let status = std::process::Command::new("open")
+        .arg("-R")
+        .arg(&attachment)
+        .status()
+        .map_err(|e| format!("Failed to reveal attachment: {}", e))?;
+
+    #[cfg(target_os = "windows")]
+    let status = std::process::Command::new("explorer")
+        .arg(format!("/select,{}", attachment.to_string_lossy()))
+        .status()
+        .map_err(|e| format!("Failed to reveal attachment: {}", e))?;
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let status = std::process::Command::new("xdg-open")
+        .arg(
+            attachment
+                .parent()
+                .ok_or_else(|| "Attachment has no parent folder.".to_string())?,
+        )
+        .status()
+        .map_err(|e| format!("Failed to reveal attachment: {}", e))?;
 
     if status.success() {
         Ok(())
@@ -1391,6 +1529,92 @@ async fn transcribe_audio(
     Ok(body)
 }
 
+fn validate_audio_path(path: &str) -> Result<std::path::PathBuf, String> {
+    let raw = std::path::PathBuf::from(path);
+    let canonical = raw
+        .canonicalize()
+        .map_err(|e| format!("Could not resolve audio path: {}", e))?;
+    if !canonical.is_file() {
+        return Err("Audio path is not a file.".into());
+    }
+
+    let extension = canonical
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let allowed = ["m4a", "mp3", "wav", "webm", "flac", "ogg", "aac"];
+    if !allowed.contains(&extension.as_str()) {
+        return Err("Supported audio uploads: m4a, mp3, wav, webm, flac, ogg, aac.".into());
+    }
+
+    Ok(canonical)
+}
+
+fn audio_mime_for_path(path: &std::path::Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "m4a" => "audio/mp4",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "webm" => "audio/webm",
+        "flac" => "audio/flac",
+        "ogg" => "audio/ogg",
+        "aac" => "audio/aac",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Transcribe a desktop audio file via the speech API endpoint.
+#[tauri::command]
+async fn transcribe_audio_file(api_url: String, path: String) -> Result<serde_json::Value, String> {
+    let audio_path = validate_audio_path(&path)?;
+    let filename = audio_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("recording")
+        .to_string();
+    let audio_data = tokio::fs::read(&audio_path)
+        .await
+        .map_err(|e| format!("Failed to read audio file: {}", e))?;
+    let base = if api_url.is_empty() {
+        api_base()
+    } else {
+        api_url
+    };
+    let url = format!("{}/v1/speech/transcribe", base);
+    let client = reqwest::Client::new();
+
+    let part = reqwest::multipart::Part::bytes(audio_data)
+        .file_name(filename)
+        .mime_str(audio_mime_for_path(&audio_path))
+        .map_err(|e| format!("Failed to create multipart: {}", e))?;
+
+    let form = reqwest::multipart::Form::new().part("file", part);
+
+    let resp = client
+        .post(&url)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("Connection failed: {}", e))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Transcription failed with {}: {}", status, body));
+    }
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Invalid response: {}", e))?;
+    Ok(body)
+}
+
 /// Submit savings to Supabase leaderboard.
 #[tauri::command]
 async fn submit_savings(
@@ -1653,7 +1877,7 @@ mod native_overlay {
         // Also inject CSS to nuke any remaining background
         let js = nsstring(
             "document.documentElement.style.background='transparent';\
-             document.body.style.background='transparent';"
+             document.body.style.background='transparent';",
         );
         let nil: *mut Object = std::ptr::null_mut();
         let _: () = msg_send![wv, evaluateJavaScript: js completionHandler: nil];
@@ -1684,7 +1908,9 @@ mod native_overlay {
             let sup = Class::get("NSObject").unwrap();
             let mut decl = ClassDecl::new("JarvisOverlayNavDelegate", sup).unwrap();
             extern "C" fn did_finish(_: &Object, _: Sel, wv: *mut Object, _nav: *mut Object) {
-                unsafe { force_transparent(wv); }
+                unsafe {
+                    force_transparent(wv);
+                }
             }
             decl.add_method(
                 sel!(webView:didFinishNavigation:),
@@ -2052,9 +2278,13 @@ pub fn run() {
             fetch_savings,
             submit_savings,
             transcribe_audio,
+            transcribe_audio_file,
             speech_health,
             open_artifact,
             reveal_artifact,
+            open_attachment,
+            reveal_attachment,
+            read_attachment_data_url,
             pull_ollama_model,
             delete_ollama_model,
             save_cloud_key,

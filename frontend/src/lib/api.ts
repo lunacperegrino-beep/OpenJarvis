@@ -358,6 +358,13 @@ export async function transcribeAudio(audioBlob: Blob, filename = 'recording.web
   return res.json();
 }
 
+export async function transcribeAudioFile(path: string): Promise<TranscriptionResult> {
+  if (!isTauri()) {
+    throw new Error('File transcription is only available in the desktop app.');
+  }
+  return tauriInvoke<TranscriptionResult>('transcribe_audio_file', { path });
+}
+
 export async function fetchSpeechHealth(): Promise<SpeechHealth> {
   if (isTauri()) {
     try {
