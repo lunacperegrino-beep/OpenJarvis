@@ -16,9 +16,86 @@ import {
   Key,
   Search,
   Brain,
+  Wrench,
+  RefreshCw,
 } from 'lucide-react';
 import { useAppStore, type ThemeMode } from '../lib/store';
-import { checkHealth, fetchSpeechHealth, getMemoryStats } from '../lib/api';
+import { checkHealth, fetchSpeechHealth, getMemoryStats, getBase } from '../lib/api';
+
+const CATEGORY_ORDER = ['reasoning', 'search', 'code', 'filesystem', 'memory', 'media', 'system', 'network', 'mcp', 'general'];
+
+function ActiveTools() {
+  const [tools, setTools] = useState<Array<{ name: string; category: string }> | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const load = () => {
+    setLoading(true);
+    fetch(`${getBase()}/v1/info`)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        setTools(data?.active_tools ?? null);
+        setLoading(false);
+      })
+      .catch(() => { setTools(null); setLoading(false); });
+  };
+
+  useEffect(() => { load(); }, []);
+
+  if (loading) {
+    return <span className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>Loading…</span>;
+  }
+  if (!tools || tools.length === 0) {
+    return <span className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>No tools loaded (server not connected?)</span>;
+  }
+
+  const byCategory = tools.reduce<Record<string, string[]>>((acc, t) => {
+    const cat = t.category || 'general';
+    (acc[cat] = acc[cat] ?? []).push(t.name);
+    return acc;
+  }, {});
+
+  const sortedCategories = [
+    ...CATEGORY_ORDER.filter(c => byCategory[c]),
+    ...Object.keys(byCategory).filter(c => !CATEGORY_ORDER.includes(c)).sort(),
+  ];
+
+  return (
+    <div className="flex flex-col gap-3 mt-1">
+      <div className="flex items-center justify-between">
+        <span className="text-xs" style={{ color: 'var(--color-text-tertiary)' }}>
+          {tools.length} tools active on orchestrator
+        </span>
+        <button
+          onClick={load}
+          className="flex items-center gap-1 text-[11px] px-2 py-1 rounded cursor-pointer transition-colors"
+          style={{ color: 'var(--color-text-tertiary)', background: 'var(--color-bg-secondary)', border: '1px solid var(--color-border)' }}
+          title="Refresh"
+        >
+          <RefreshCw size={10} /> Refresh
+        </button>
+      </div>
+      {sortedCategories.map(cat => (
+        <div key={cat}>
+          <div className="text-[10px] font-semibold uppercase tracking-wider mb-1.5" style={{ color: 'var(--color-text-tertiary)' }}>
+            {cat}
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {byCategory[cat].map(name => (
+              <span
+                key={name}
+                className="flex items-center gap-1 px-2 py-0.5 rounded text-[11px]"
+                style={{ background: 'var(--color-bg-tertiary, var(--color-bg-secondary))', color: 'var(--color-text)', border: '1px solid var(--color-border)' }}
+              >
+                <span style={{ width: 5, height: 5, borderRadius: '50%', background: 'var(--color-accent)', display: 'inline-block', flexShrink: 0 }} />
+                {name}
+              </span>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 function OllamaModelList() {
   const [models, setModels] = useState<Array<{ name: string; size: number }>>([]);
@@ -334,6 +411,13 @@ export function SettingsPage() {
             <SettingRow label="Web Search" description="SerpAPI or Tavily key for web search tool">
               <ApiKeyInput storageKey="openjarvis-search-key" placeholder="API key..." />
             </SettingRow>
+            <div className="pt-4" style={{ borderTop: '1px solid var(--color-border-subtle)' }}>
+              <div className="flex items-center gap-2 mb-3">
+                <Wrench size={13} style={{ color: 'var(--color-accent)' }} />
+                <span className="text-sm font-medium" style={{ color: 'var(--color-text)' }}>Active Orchestrator Tools</span>
+              </div>
+              <ActiveTools />
+            </div>
           </Section>
 
           {/* Memory */}

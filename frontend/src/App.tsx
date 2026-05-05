@@ -59,7 +59,11 @@ export default function App() {
     fetchModels()
       .then((m) => {
         setModels(m);
-        if (!selectedModel && m.length > 0) setSelectedModel(m[0].id);
+        if (!selectedModel && m.length > 0) {
+          const { settings: s } = useAppStore.getState();
+          const preferred = s.defaultModel && m.find((x) => x.id === s.defaultModel);
+          setSelectedModel(preferred ? preferred.id : m[0].id);
+        }
       })
       .catch(() => setModels([]))
       .finally(() => setModelsLoading(false));
