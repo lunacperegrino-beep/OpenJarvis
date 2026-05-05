@@ -674,6 +674,8 @@ async fn boot_backend(backend: SharedBackend, status: SharedStatus) {
             "inference-cloud",
             "--extra",
             "inference-google",
+            "--extra",
+            "speech",
         ])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
