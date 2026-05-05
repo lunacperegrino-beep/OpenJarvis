@@ -15,11 +15,15 @@ export function InputArea() {
   const [pendingAttachments, setPendingAttachments] = useState<ChatAttachment[]>([]);
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
   const [uploadingAudio, setUploadingAudio] = useState(false);
+  const [dragActive, setDragActive] = useState(false);
+  const dropZoneRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const audioInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const dragDepthRef = useRef(0);
+  const suppressDropUntilRef = useRef(0);
 
   const activeId = useAppStore((s) => s.activeId);
   const selectedModel = useAppStore((s) => s.selectedModel);
@@ -258,6 +262,84 @@ export function InputArea() {
       file,
     );
   }, [transcribeSelectedAudio]);
+
+  const handleDroppedFiles = useCallback(async (files: File[]) => {
+    if (streamState.isStreaming || modelLoading || uploadingAudio) {
+      toast.error('Wait for the current request to finish before dropping a file');
+      return;
+    }
+
+    const images = files.filter(isImageFile);
+    const audio = files.filter(isAudioFile);
+
+    if (images.length === 0 && audio.length === 0) {
+      toast.error('Drop an audio or image file');
+      return;
+    }
+
+    for (const file of images.slice(0, 4)) {
+      await handleBrowserImage(file);
+    }
+
+    if (audio.length > 0) {
+      if (audio.length > 1) {
+        toast.info('Transcribing the first audio file');
+      }
+      await handleBrowserAudio(audio[0]);
+    }
+  }, [
+    handleBrowserAudio,
+    handleBrowserImage,
+    modelLoading,
+    streamState.isStreaming,
+    uploadingAudio,
+  ]);
+
+  const handleDroppedPaths = useCallback(async (paths: string[]) => {
+    if (streamState.isStreaming || modelLoading || uploadingAudio) {
+      toast.error('Wait for the current request to finish before dropping a file');
+      return;
+    }
+
+    const images = paths.filter(isImagePath);
+    const audio = paths.filter(isAudioPath);
+
+    if (images.length === 0 && audio.length === 0) {
+      toast.error('Drop an audio or image file');
+      return;
+    }
+
+    for (const path of images.slice(0, 4)) {
+      addPendingImage({
+        id: generateId(),
+        kind: 'image',
+        name: basename(path),
+        path,
+      });
+    }
+
+    if (audio.length > 0) {
+      if (audio.length > 1) {
+        toast.info('Transcribing the first audio file');
+      }
+      const path = audio[0];
+      await transcribeSelectedAudio(
+        {
+          id: generateId(),
+          kind: 'audio',
+          name: basename(path),
+          path,
+        },
+        path,
+      );
+    }
+  }, [
+    addPendingImage,
+    modelLoading,
+    streamState.isStreaming,
+    transcribeSelectedAudio,
+    uploadingAudio,
+  ]);
 
   const sendMessage = useCallback(async (
     overrideContent?: string,
@@ -527,6 +609,45 @@ export function InputArea() {
     };
   }, [sendMessage]);
 
+  useEffect(() => {
+    if (!isTauri()) return;
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+
+    import('@tauri-apps/api/webview')
+      .then(({ getCurrentWebview }) => getCurrentWebview().onDragDropEvent((event) => {
+        const payload = event.payload;
+        if (payload.type === 'enter' || payload.type === 'over') {
+          setDragActive(isPhysicalPointInsideElement(payload.position, dropZoneRef.current));
+          return;
+        }
+        if (payload.type === 'leave') {
+          setDragActive(false);
+          return;
+        }
+        if (payload.type === 'drop') {
+          setDragActive(false);
+          if (!isPhysicalPointInsideElement(payload.position, dropZoneRef.current)) return;
+          if (Date.now() < suppressDropUntilRef.current) return;
+          suppressDropUntilRef.current = Date.now() + 700;
+          void handleDroppedPaths(payload.paths);
+        }
+      }))
+      .then((fn) => {
+        if (cancelled) {
+          fn();
+        } else {
+          unlisten = fn;
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [handleDroppedPaths]);
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -534,8 +655,51 @@ export function InputArea() {
     }
   };
 
+  const handleDragEnter = (event: React.DragEvent<HTMLDivElement>) => {
+    if (!hasDroppableFiles(event.dataTransfer)) return;
+    event.preventDefault();
+    dragDepthRef.current += 1;
+    setDragActive(true);
+  };
+
+  const handleDragOver = (event: React.DragEvent<HTMLDivElement>) => {
+    if (!hasDroppableFiles(event.dataTransfer)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+    setDragActive(true);
+  };
+
+  const handleDragLeave = (event: React.DragEvent<HTMLDivElement>) => {
+    if (!hasDroppableFiles(event.dataTransfer)) return;
+    event.preventDefault();
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) {
+      setDragActive(false);
+    }
+  };
+
+  const handleDrop = (event: React.DragEvent<HTMLDivElement>) => {
+    if (!hasDroppableFiles(event.dataTransfer)) return;
+    event.preventDefault();
+    dragDepthRef.current = 0;
+    setDragActive(false);
+    if (Date.now() < suppressDropUntilRef.current) return;
+    const files = Array.from(event.dataTransfer.files || []);
+    if (files.length === 0) return;
+    suppressDropUntilRef.current = Date.now() + 700;
+    void handleDroppedFiles(files);
+  };
+
   return (
-    <div className="px-4 pb-4 pt-2" style={{ maxWidth: 'var(--chat-max-width)', margin: '0 auto', width: '100%' }}>
+    <div
+      ref={dropZoneRef}
+      className="px-4 pb-4 pt-2"
+      style={{ maxWidth: 'var(--chat-max-width)', margin: '0 auto', width: '100%' }}
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
       {pendingAttachments.length > 0 && (
         <div className="mb-2 flex flex-col gap-2">
           {pendingAttachments.map((attachment) => (
@@ -562,8 +726,8 @@ export function InputArea() {
         className="relative flex items-center gap-2 rounded-2xl px-4 py-3 transition-shadow"
         style={{
           background: 'var(--color-input-bg)',
-          border: '1px solid var(--color-input-border)',
-          boxShadow: 'var(--shadow-sm)',
+          border: dragActive ? '1px solid var(--color-accent)' : '1px solid var(--color-input-border)',
+          boxShadow: dragActive ? '0 0 0 3px var(--color-accent-subtle)' : 'var(--shadow-sm)',
         }}
       >
         <div className="relative">
@@ -724,6 +888,47 @@ async function pickDesktopAttachment(kind: 'audio' | 'image'): Promise<string | 
 
 function basename(path: string): string {
   return path.split(/[\\/]/).filter(Boolean).pop() || path;
+}
+
+const AUDIO_EXTENSIONS = new Set(['m4a', 'mp3', 'wav', 'webm', 'flac', 'ogg', 'aac']);
+const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'tif', 'tiff']);
+
+function extensionFromName(name: string): string {
+  const match = /\.([^.\\/]+)$/.exec(name.toLowerCase());
+  return match?.[1] || '';
+}
+
+function isAudioPath(path: string): boolean {
+  return AUDIO_EXTENSIONS.has(extensionFromName(path));
+}
+
+function isImagePath(path: string): boolean {
+  return IMAGE_EXTENSIONS.has(extensionFromName(path));
+}
+
+function isAudioFile(file: File): boolean {
+  return file.type.startsWith('audio/') || isAudioPath(file.name);
+}
+
+function isImageFile(file: File): boolean {
+  return file.type.startsWith('image/') || isImagePath(file.name);
+}
+
+function hasDroppableFiles(dataTransfer: DataTransfer): boolean {
+  if (Array.from(dataTransfer.types).includes('Files')) return true;
+  return Array.from(dataTransfer.items || []).some((item) => item.kind === 'file');
+}
+
+function isPhysicalPointInsideElement(
+  position: { x: number; y: number },
+  element: HTMLElement | null,
+): boolean {
+  if (!element) return false;
+  const rect = element.getBoundingClientRect();
+  const scale = window.devicePixelRatio || 1;
+  const x = position.x / scale;
+  const y = position.y / scale;
+  return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
 }
 
 function formatAttachmentOnlyMessage(attachments: ChatAttachment[]): string {
