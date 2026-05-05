@@ -173,6 +173,13 @@ def serve(
     # Resolve agent
     agent = None
     agent_key = agent_name or config.server.agent
+    # Auto-enable default agent when MCP is configured (mirrors Bug 3 fix in ask.py)
+    mcp_configured = (
+        getattr(config.tools.mcp, "enabled", False)
+        and getattr(config.tools.mcp, "servers", "")
+    )
+    if not agent_key and mcp_configured:
+        agent_key = config.agent.default_agent
     if agent_key:
         try:
             import openjarvis.agents  # noqa: F401
@@ -217,6 +224,32 @@ def serve(
                             tools.append(tool_cls())
                         elif isinstance(tool_cls, BaseTool):
                             tools.append(tool_cls)
+                    # Load external MCP tools (mirrors Bug 2 fix in ask.py)
+                    if mcp_configured:
+                        try:
+                            import json as _json
+
+                            from openjarvis.mcp.client import MCPClient
+                            from openjarvis.mcp.transport import StdioTransport
+                            from openjarvis.tools.mcp_adapter import MCPToolProvider
+
+                            server_list = _json.loads(config.tools.mcp.servers)
+                            for srv in server_list:
+                                cmd = srv.get("command", "")
+                                args = srv.get("args", [])
+                                if not cmd:
+                                    continue
+                                transport = StdioTransport([cmd] + args)
+                                client = MCPClient(transport)
+                                client.initialize()
+                                discovered = MCPToolProvider(client).discover()
+                                tools.extend(discovered)
+                        except Exception as _exc:
+                            logger.warning(
+                                "Failed to load external MCP tools: %s",
+                                _exc,
+                            )
+
                     if tools:
                         agent_kwargs["tools"] = tools
 

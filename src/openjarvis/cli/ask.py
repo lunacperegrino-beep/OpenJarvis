@@ -162,6 +162,29 @@ def _run_agent(
 
         tools = _build_tools(tool_names, config, engine, model_name)
 
+    # Load external MCP tools (e.g. Apple MCP)
+    if config.tools.mcp.enabled and config.tools.mcp.servers:
+        try:
+            import json as _json
+
+            from openjarvis.mcp.client import MCPClient
+            from openjarvis.mcp.transport import StdioTransport
+            from openjarvis.tools.mcp_adapter import MCPToolProvider
+
+            server_list = _json.loads(config.tools.mcp.servers)
+            for srv in server_list:
+                cmd = srv.get("command", "")
+                args = srv.get("args", [])
+                if not cmd:
+                    continue
+                transport = StdioTransport([cmd] + args)
+                client = MCPClient(transport)
+                client.initialize()
+                discovered = MCPToolProvider(client).discover()
+                tools.extend(discovered)
+        except Exception as _exc:
+            logger.warning("Failed to load external MCP tools: %s", _exc)
+
     # Build agent with appropriate kwargs
     agent_kwargs = {
         "bus": bus,
@@ -499,6 +522,14 @@ def ask(
             max_tokens,
             model_name,
         )
+
+    # Auto-enable agent mode when external MCP servers are configured
+    mcp_configured = (
+        getattr(config.tools.mcp, "enabled", False)
+        and getattr(config.tools.mcp, "servers", "")
+    )
+    if agent_name is None and mcp_configured:
+        agent_name = config.agent.default_agent
 
     # Agent mode
     if agent_name is not None:

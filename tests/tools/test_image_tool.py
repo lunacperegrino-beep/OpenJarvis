@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import builtins
 import sys
 from unittest.mock import MagicMock
@@ -16,7 +17,7 @@ class TestImageGenerateTool:
         assert tool.spec.category == "media"
         assert "prompt" in tool.spec.parameters["properties"]
         assert "prompt" in tool.spec.parameters["required"]
-        assert tool.spec.required_capabilities == ["network:fetch"]
+        assert tool.spec.required_capabilities == []
 
     def test_tool_id(self):
         tool = ImageGenerateTool()
@@ -59,7 +60,7 @@ class TestImageGenerateTool:
         monkeypatch.setattr(builtins, "__import__", _mock_import)
 
         tool = ImageGenerateTool()
-        result = tool.execute(prompt="a cat")
+        result = tool.execute(prompt="a cat", provider="openai")
         assert result.success is False
         assert "openai package not installed" in result.content
 
@@ -69,7 +70,7 @@ class TestImageGenerateTool:
         monkeypatch.setitem(sys.modules, "openai", mock_openai)
 
         tool = ImageGenerateTool()
-        result = tool.execute(prompt="a cat")
+        result = tool.execute(prompt="a cat", provider="openai")
         assert result.success is False
         assert "No API key" in result.content
 
@@ -89,11 +90,11 @@ class TestImageGenerateTool:
         monkeypatch.setitem(sys.modules, "openai", mock_openai)
 
         tool = ImageGenerateTool()
-        result = tool.execute(prompt="a cat on a mat")
+        result = tool.execute(prompt="a cat on a mat", provider="openai")
         assert result.success is True
         assert result.content == "https://example.com/image.png"
         assert result.metadata["url"] == "https://example.com/image.png"
-        assert result.metadata["size"] == "1024x1024"
+        assert result.metadata["size"] == "512x512"
         assert result.metadata["provider"] == "openai"
 
     def test_save_to_file(self, monkeypatch, tmp_path):
@@ -123,6 +124,7 @@ class TestImageGenerateTool:
         tool = ImageGenerateTool()
         result = tool.execute(
             prompt="a cat",
+            provider="openai",
             output_path=str(output_file),
         )
         assert result.success is True
@@ -139,9 +141,33 @@ class TestImageGenerateTool:
         monkeypatch.setitem(sys.modules, "openai", mock_openai)
 
         tool = ImageGenerateTool()
-        result = tool.execute(prompt="a cat")
+        result = tool.execute(prompt="a cat", provider="openai")
         assert result.success is False
         assert "Image generation error" in result.content
+
+    def test_drawthings_success(self, monkeypatch, tmp_path):
+        import httpx
+
+        image_bytes = b"\x89PNG\r\n\x1a\nfake-drawthings-image"
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "images": [base64.b64encode(image_bytes).decode("ascii")]
+        }
+        mock_resp.raise_for_status = MagicMock()
+        post = MagicMock(return_value=mock_resp)
+        monkeypatch.setattr(httpx, "post", post)
+
+        output_file = tmp_path / "drawthings.png"
+        tool = ImageGenerateTool()
+        result = tool.execute(
+            prompt="a cat",
+            output_path=str(output_file),
+        )
+
+        assert result.success is True
+        assert output_file.read_bytes() == image_bytes
+        assert result.metadata["path"] == str(output_file)
+        assert result.metadata["provider"] == "drawthings"
 
     def test_to_openai_function(self):
         tool = ImageGenerateTool()

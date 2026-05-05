@@ -229,7 +229,7 @@ class ToolExecutor:
         if self._bus:
             self._bus.publish(
                 EventType.TOOL_CALL_START,
-                {"tool": tool_call.name, "arguments": params},
+                {"tool": tool_call.name, "arguments": tool_call.arguments},
             )
 
         # Execute with timeout

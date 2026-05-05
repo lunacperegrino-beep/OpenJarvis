@@ -73,6 +73,16 @@ except ImportError:
     pass
 
 try:
+    import openjarvis.tools.browser  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.browser_axtree  # noqa: F401
+except ImportError:
+    pass
+
+try:
     import openjarvis.tools.shell_exec  # noqa: F401
 except ImportError:
     pass

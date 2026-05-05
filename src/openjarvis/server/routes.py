@@ -139,11 +139,11 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
 
     if request_body.stream:
         bus = getattr(request.app.state, "bus", None)
-        # Use the agent stream bridge only when tools are present (the
-        # bridge runs agent.run() synchronously and word-splits the result,
-        # so it can't stream tokens in real-time).  For plain chat, stream
-        # directly from the engine for true token-by-token output.
-        if agent is not None and bus is not None and request_body.tools:
+        # Route through the agent stream bridge whenever an agent is available
+        # so that tools (image generation, web search, etc.) work from the
+        # desktop app.  The bridge word-splits the result rather than streaming
+        # true tokens, but that is acceptable for an agentic response.
+        if agent is not None and bus is not None:
             return await _handle_agent_stream(agent, bus, model, request_body)
         return await _handle_stream(engine, model, request_body, complexity_info)
 
@@ -459,9 +459,31 @@ async def list_models(request: Request) -> ModelListResponse:
     if not model_ids:
         model_ids = await list_local_models()
 
+    # Filter out embedding-only models (not usable for chat)
+    _EMBED_KEYWORDS = ("embed", "embedding")
+    model_ids = [
+        m for m in model_ids if not any(k in m.lower() for k in _EMBED_KEYWORDS)
+    ]
+
+    # Put the configured default model first so the UI selects it automatically
+    cfg = getattr(request.app.state, "config", None)
+    default_model = (
+        getattr(getattr(cfg, "intelligence", None), "default_model", "")
+        if cfg
+        else ""
+    )
+    if default_model and default_model in model_ids:
+        model_ids = [default_model] + [m for m in model_ids if m != default_model]
+
     return ModelListResponse(
         data=[ModelObject(id=mid) for mid in model_ids],
     )
+
+
+@router.get("/models")
+async def list_models_legacy(request: Request) -> ModelListResponse:
+    """Compatibility alias for older desktop clients that probe /models."""
+    return await list_models(request)
 
 
 @router.post("/v1/models/pull")
@@ -670,16 +692,31 @@ async def reset_telemetry():
 
 @router.get("/v1/info")
 async def server_info(request: Request):
-    """Return server configuration: model, agent, engine."""
+    """Return server configuration: model, agent, engine, and active tools."""
     agent = getattr(request.app.state, "agent", None)
     agent_id = getattr(agent, "agent_id", None) if agent else None
-    # Fall back to configured agent name if agent didn't instantiate
     if agent_id is None:
         agent_id = getattr(request.app.state, "agent_name", None)
+
+    active_tools: list[dict] = []
+    if agent is not None:
+        executor = getattr(agent, "_executor", None)
+        if executor is not None:
+            for name, tool in getattr(executor, "_tools", {}).items():
+                try:
+                    spec = tool.spec
+                    active_tools.append({
+                        "name": name,
+                        "category": spec.category or "general",
+                    })
+                except Exception:
+                    active_tools.append({"name": name, "category": "general"})
+
     return {
         "model": getattr(request.app.state, "model", ""),
         "agent": agent_id,
         "engine": getattr(request.app.state, "engine_name", ""),
+        "active_tools": active_tools,
     }
 
 
