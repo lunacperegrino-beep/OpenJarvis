@@ -5,6 +5,7 @@ import { toast } from 'sonner';
 import { useAppStore, generateId } from '../../lib/store';
 import { streamChat } from '../../lib/sse';
 import { fetchSavings, getBase, isTauri, transcribeAudio, transcribeAudioFile } from '../../lib/api';
+import { isTranscriptArtifact } from '../../lib/artifacts';
 import { MicButton } from './MicButton';
 import { AttachmentCard } from './AttachmentCard';
 import { useSpeech } from '../../hooks/useSpeech';
@@ -354,6 +355,7 @@ export function InputArea() {
   const sendMessage = useCallback(async (
     overrideContent?: string,
     overrideAttachments?: ChatAttachment[],
+    hiddenTranscriptContext?: string,
   ) => {
     const attachments = overrideAttachments ?? pendingAttachments;
     const content = (overrideContent ?? input).trim();
@@ -412,7 +414,7 @@ export function InputArea() {
 
     // Build API messages before adding assistant placeholder
     const currentMessages = useAppStore.getState().messages;
-    const apiMessages = buildApiMessages(currentMessages);
+    const apiMessages = buildApiMessages(currentMessages, hiddenTranscriptContext);
 
     const assistantMsg: ChatMessage = {
       id: generateId(),
@@ -627,6 +629,20 @@ export function InputArea() {
     window.addEventListener('openjarvis:regenerate-image', regenerateImage);
     return () => {
       window.removeEventListener('openjarvis:regenerate-image', regenerateImage);
+    };
+  }, [sendMessage]);
+
+  useEffect(() => {
+    const runTranscriptAction = (event: Event) => {
+      const detail = (event as CustomEvent<{ prompt?: string; transcript?: string }>).detail;
+      const prompt = detail?.prompt?.trim();
+      if (!prompt) return;
+      void sendMessage(prompt, undefined, detail?.transcript);
+    };
+
+    window.addEventListener('openjarvis:transcript-action', runTranscriptAction);
+    return () => {
+      window.removeEventListener('openjarvis:transcript-action', runTranscriptAction);
     };
   }, [sendMessage]);
 
@@ -976,18 +992,24 @@ interface TranscriptArtifact {
   content: string;
 }
 
-function buildApiMessages(messages: ChatMessage[]): Array<{ role: string; content: string }> {
+function buildApiMessages(
+  messages: ChatMessage[],
+  hiddenTranscriptContext?: string,
+): Array<{ role: string; content: string }> {
   const lastUserIndex = findLastUserIndex(messages);
   const lastUser = lastUserIndex >= 0 ? messages[lastUserIndex] : null;
-  const transcript =
-    lastUser && shouldAttachRecentTranscript(lastUser.content)
+  const forcedTranscript = hiddenTranscriptContext?.trim()
+    ? { index: -1, content: hiddenTranscriptContext.trim() }
+    : null;
+  const transcript = forcedTranscript ||
+    (lastUser && shouldAttachRecentTranscript(lastUser.content)
       ? findRecentTranscriptArtifact(messages, lastUserIndex)
-      : null;
+      : null);
 
   return messages.map((message, index) => {
     let content = buildApiMessageContent(message.content, message.attachments);
 
-    if (transcript && index === transcript.index) {
+    if (transcript && transcript.index >= 0 && index === transcript.index) {
       content = (
         '[Transcript artifact generated earlier in this conversation. ' +
         'The full transcript is attached to the latest user request.]'
@@ -1020,10 +1042,6 @@ function findRecentTranscriptArtifact(
     }
   }
   return null;
-}
-
-function isTranscriptArtifact(content: string): boolean {
-  return /^Transcript for \*\*.+?\*\*/m.test(content.trim());
 }
 
 function shouldAttachRecentTranscript(content: string): boolean {

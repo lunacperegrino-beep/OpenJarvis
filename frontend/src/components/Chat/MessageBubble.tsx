@@ -8,6 +8,7 @@ import 'katex/dist/katex.min.css';
 import { Copy, Check } from 'lucide-react';
 import { AttachmentCard } from './AttachmentCard';
 import { AudioPlayer } from './AudioPlayer';
+import { TranscriptActions } from './TranscriptActions';
 import { ToolCallCard } from './ToolCallCard';
 import { XRayFooter } from './XRayFooter';
 import type { ChatMessage } from '../../types';
@@ -184,17 +185,20 @@ export function MessageBubble({ message }: Props) {
 
       {/* Assistant message */}
       {cleanContent && (
-        <div className="prose max-w-none">
-          <ReactMarkdown
-            remarkPlugins={[remarkGfm, remarkMath]}
-            rehypePlugins={[[rehypeHighlight, { detect: true }], rehypeKatex]}
-            components={{
-              pre: CodeBlockPre,
-            }}
-          >
-            {cleanContent}
-          </ReactMarkdown>
-        </div>
+        <>
+          <div className="prose max-w-none">
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm, remarkMath]}
+              rehypePlugins={[[rehypeHighlight, { detect: true }], rehypeKatex]}
+              components={{
+                pre: CodeBlockPre,
+              }}
+            >
+              {cleanContent}
+            </ReactMarkdown>
+          </div>
+          <TranscriptActions content={cleanContent} />
+        </>
       )}
 
       {/* Footer: copy + x-ray */}

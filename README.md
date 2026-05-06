@@ -42,6 +42,8 @@ Compared with upstream OpenJarvis, this branch adds or improves:
 | Audio upload and transcription | The chat input accepts audio uploads and drag-and-drop audio files, then transcribes them directly in the conversation. |
 | MLX Whisper on Apple Silicon | Adds a fast `mlx-whisper` speech backend for macOS/Apple Silicon, including `large-v3-turbo` support and automatic language detection. |
 | Transcript follow-ups | Follow-up prompts like "format the transcript above" now attach the recent transcript explicitly, so the model should not ask you to paste text it just generated. |
+| Transcript Studio actions | Transcript messages include one-click actions for speaker formatting, summaries, action items, translation, cleanup, copy, and Markdown export. |
+| Artifact library | A new Artifacts page collects generated images, uploaded audio, uploaded images, and transcripts across local conversations with search, filters, preview, copy, open, reveal, export, and jump-to-chat actions. |
 | Image uploads | The desktop chat can attach image files and display them as file artifacts, even though full visual understanding is not wired into this build yet. |
 | Health/status panel | The system panel shows readiness for the backend API, Ollama, selected model, speech backend, Draw Things, and image folder permissions. |
 | Settings polish | Settings can show the configured default model and active orchestrator tools exposed by the backend. |

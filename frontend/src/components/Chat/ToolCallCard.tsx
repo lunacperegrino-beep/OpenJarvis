@@ -15,20 +15,14 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import type { ToolCallInfo } from '../../types';
+import {
+  getGeneratedImageArtifact,
+  type GeneratedImageArtifact,
+} from '../../lib/artifacts';
 import { isTauri } from '../../lib/api';
 
 interface Props {
   toolCall: ToolCallInfo;
-}
-
-interface GeneratedImageArtifact {
-  src: string;
-  label: string;
-  path?: string;
-  url?: string;
-  prompt?: string;
-  provider?: string;
-  size?: string;
 }
 
 const statusConfig = {
@@ -72,12 +66,15 @@ export function ToolCallCard({ toolCall }: Props) {
   const argsText = formatJson(toolCall.arguments);
   const resultText = formatJson(toolCall.result);
   const imageArtifact = getGeneratedImageArtifact(toolCall);
-  const showImagePreview = !!imageArtifact?.src && !imageErrored;
+  const imageSrc =
+    imageArtifact?.url ||
+    (imageArtifact?.path && isTauri() ? convertFileSrc(imageArtifact.path) : '');
+  const showImagePreview = !!imageSrc && !imageErrored;
   const toolDisplay = getToolDisplay(toolCall, imageArtifact, preview);
 
   useEffect(() => {
     setImageErrored(false);
-  }, [imageArtifact?.src]);
+  }, [imageSrc]);
 
   const openArtifact = async () => {
     if (!imageArtifact) return;
@@ -86,8 +83,8 @@ export function ToolCallCard({ toolCall }: Props) {
         await invoke('open_artifact', { path: imageArtifact.path });
       } else if (imageArtifact.url) {
         window.open(imageArtifact.url, '_blank', 'noopener,noreferrer');
-      } else if (imageArtifact.src) {
-        window.open(imageArtifact.src, '_blank', 'noopener,noreferrer');
+      } else if (imageSrc) {
+        window.open(imageSrc, '_blank', 'noopener,noreferrer');
       }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
@@ -262,7 +259,7 @@ export function ToolCallCard({ toolCall }: Props) {
               }}
             >
               <img
-                src={imageArtifact.src}
+                src={imageSrc}
                 alt="Generated image preview"
                 className="block max-w-full"
                 style={{ maxHeight: 320, objectFit: 'contain' }}
@@ -353,70 +350,6 @@ function formatJson(raw: unknown): string {
   } catch {
     return raw;
   }
-}
-
-function asRecord(raw: unknown): Record<string, unknown> | null {
-  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-    return raw as Record<string, unknown>;
-  }
-  if (typeof raw !== 'string') return null;
-  try {
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-function firstString(...values: unknown[]): string {
-  for (const value of values) {
-    if (typeof value === 'string' && value.trim()) return value.trim();
-  }
-  return '';
-}
-
-function toDisplayText(raw: unknown): string {
-  if (raw === null || raw === undefined) return '';
-  return typeof raw === 'string' ? raw : JSON.stringify(raw) ?? String(raw);
-}
-
-function extractImageReference(raw: unknown): { path?: string; url?: string } {
-  const text = toDisplayText(raw);
-  const url = text.match(/https?:\/\/[^\s"')]+/i)?.[0];
-  const path = text.match(/((?:\/|[A-Za-z]:\\)[^\n"]+?\.(?:png|jpe?g|webp|gif|bmp|tiff?))/i)?.[0];
-  return { path, url };
-}
-
-function getGeneratedImageArtifact(
-  toolCall: ToolCallInfo,
-): GeneratedImageArtifact | null {
-  if (toolCall.status !== 'success') return null;
-  if (String(toolCall.tool) !== 'image_generate') return null;
-
-  const metadata = asRecord(toolCall.metadata);
-  const result = asRecord(toolCall.result);
-  const args = asRecord(toolCall.arguments);
-  const extracted = extractImageReference(toolCall.result);
-  const path = firstString(metadata?.path, result?.path, extracted.path);
-  const url = firstString(metadata?.url, result?.url, extracted.url);
-  const prompt = firstString(args?.prompt, metadata?.prompt, result?.prompt);
-  const provider = firstString(metadata?.provider, result?.provider);
-  const size = firstString(metadata?.size, args?.size, result?.size);
-
-  if (url) return { src: url, label: url, url, prompt, provider, size };
-  if (path) {
-    return {
-      src: isTauri() ? convertFileSrc(path) : '',
-      label: path,
-      path,
-      prompt,
-      provider,
-      size,
-    };
-  }
-  return null;
 }
 
 function getToolDisplay(
