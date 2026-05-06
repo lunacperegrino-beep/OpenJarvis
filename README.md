@@ -49,6 +49,9 @@ Compared with upstream OpenJarvis, this branch adds or improves:
 | Settings polish | Settings can show the configured default model and active orchestrator tools exposed by the backend. |
 | Safer development flow | Changes are kept as Git savepoints and verified with frontend builds, Python lint checks, and focused tests before pushing. |
 
+The next desktop-assistant ideas are tracked in
+[Luna Desktop Assistant Roadmap](docs/development/luna-desktop-assistant-roadmap.md).
+
 ### Try This Branch
 
 This branch is not an official upstream release. It is best for macOS users who
