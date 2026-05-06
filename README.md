@@ -82,9 +82,7 @@ Optional local tools:
 If this desktop-focused fork helps you, you can support ongoing polish and
 testing here:
 
-> **Buy Me a Coffee:** add link here
-
-Replace the placeholder above with your Buy Me a Coffee URL when it is ready.
+> **Ko-fi:** [ko-fi.com/luna_sixx_](https://ko-fi.com/luna_sixx_)
 
 If you already have an installed app, keep a backup before replacing it:
 
