@@ -9,6 +9,24 @@ OpenJarvis runs entirely on your hardware. Choose the interface that fits your w
 
 ---
 
+## Luna Desktop Polish Fork
+
+This fork includes experimental desktop polish that is not in the upstream
+OpenJarvis release yet: chat image artifacts, audio uploads, MLX Whisper
+transcription, transcript actions, an artifact library, Draw Things integration,
+and a richer system readiness panel.
+
+| Platform | Download | Notes |
+|----------|----------|-------|
+| macOS (Apple Silicon) | [:material-download: **OpenJarvis Luna Desktop v0.1.0 Alpha 1**](https://github.com/lunacperegrino-beep/OpenJarvis/releases/tag/luna-desktop-v0.1.0-alpha.1) | Experimental fork build for M1/M2/M3/M4 Macs |
+
+!!! warning "Unofficial prerelease"
+    This is Luna's desktop-focused fork, not an official upstream OpenJarvis
+    release. The app is signed ad hoc but not Apple-notarized, so macOS may ask
+    you to approve it the first time you open it.
+
+---
+
 ## Desktop App
 
 The desktop app is a native window for the OpenJarvis chat UI. All inference and backend

@@ -54,6 +54,16 @@ Compared with upstream OpenJarvis, this branch adds or improves:
 This branch is not an official upstream release. It is best for macOS users who
 want the desktop app experience with local Ollama, Draw Things, and MLX Whisper.
 
+Download the current prerelease build:
+
+> **macOS Apple Silicon:** [OpenJarvis Luna Desktop v0.1.0 Alpha 1](https://github.com/lunacperegrino-beep/OpenJarvis/releases/tag/luna-desktop-v0.1.0-alpha.1)
+
+The packaged app is not Apple-notarized yet. On first open, macOS may require
+right-clicking the app and choosing **Open**, or approving it from
+**System Settings > Privacy & Security**.
+
+If you want to build from source instead:
+
 ```bash
 git clone -b codex/openjarvis-image-artifacts https://github.com/lunacperegrino-beep/OpenJarvis.git
 cd OpenJarvis

@@ -10,6 +10,8 @@ use tokio::sync::Mutex;
 const OLLAMA_PORT: u16 = 11434;
 const JARVIS_PORT: u16 = 8000;
 const MAX_ATTACHMENT_PREVIEW_BYTES: u64 = 25 * 1024 * 1024;
+const LUNA_FORK_REPO: &str = "https://github.com/lunacperegrino-beep/OpenJarvis.git";
+const LUNA_FORK_BRANCH: &str = "codex/openjarvis-image-artifacts";
 
 /// Small, fast model pulled at startup so the app opens quickly.
 const STARTUP_MODEL: &str = "qwen3.5:4b";
@@ -564,7 +566,10 @@ async fn boot_backend(backend: SharedBackend, status: SharedStatus) {
                 "clone",
                 "--depth",
                 "1",
-                "https://github.com/open-jarvis/OpenJarvis.git",
+                "--branch",
+                LUNA_FORK_BRANCH,
+                "--single-branch",
+                LUNA_FORK_REPO,
                 &clone_target,
             ])
             .stdout(std::process::Stdio::null())
@@ -581,8 +586,10 @@ async fn boot_backend(backend: SharedBackend, status: SharedStatus) {
                     let mut s = status.lock().await;
                     s.error = Some(format!(
                         "Failed to download OpenJarvis: {}. \
-                         Clone manually: git clone https://github.com/open-jarvis/OpenJarvis.git {}",
+                         Clone manually: git clone -b {} {} {}",
                         stderr.trim(),
+                        LUNA_FORK_BRANCH,
+                        LUNA_FORK_REPO,
                         clone_target,
                     ));
                     return;
@@ -591,8 +598,11 @@ async fn boot_backend(backend: SharedBackend, status: SharedStatus) {
                     let mut s = status.lock().await;
                     s.error = Some(format!(
                         "Failed to download OpenJarvis: {}. \
-                         Clone manually: git clone https://github.com/open-jarvis/OpenJarvis.git {}",
-                        e, clone_target,
+                         Clone manually: git clone -b {} {} {}",
+                        e,
+                        LUNA_FORK_BRANCH,
+                        LUNA_FORK_REPO,
+                        clone_target,
                     ));
                     return;
                 }
