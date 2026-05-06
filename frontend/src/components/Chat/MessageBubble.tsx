@@ -197,7 +197,10 @@ export function MessageBubble({ message }: Props) {
               {cleanContent}
             </ReactMarkdown>
           </div>
-          <TranscriptActions content={cleanContent} />
+          <TranscriptActions
+            content={cleanContent}
+            transcriptSource={message.transcriptSource}
+          />
         </>
       )}
 

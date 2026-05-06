@@ -84,6 +84,7 @@ export interface ChatMessage {
   usage?: TokenUsage;
   telemetry?: MessageTelemetry;
   audio?: { url: string };
+  transcriptSource?: string;
 }
 
 export interface Conversation {

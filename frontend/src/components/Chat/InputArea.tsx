@@ -586,6 +586,7 @@ export function InputArea() {
         usage,
         telemetry,
         audioMeta,
+        hiddenTranscriptContext,
       );
       if (timerRef.current) {
         clearInterval(timerRef.current);

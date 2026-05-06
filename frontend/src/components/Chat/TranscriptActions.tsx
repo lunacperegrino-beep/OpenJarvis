@@ -14,11 +14,15 @@ import { parseTranscriptArtifact } from '../../lib/artifacts';
 
 interface Props {
   content: string;
+  transcriptSource?: string;
 }
 
-export function TranscriptActions({ content }: Props) {
+export function TranscriptActions({ content, transcriptSource }: Props) {
   const [copied, setCopied] = useState(false);
-  const transcript = useMemo(() => parseTranscriptArtifact(content), [content]);
+  const transcript = useMemo(
+    () => parseTranscriptArtifact(transcriptSource || content),
+    [content, transcriptSource],
+  );
   if (!transcript) return null;
 
   const runAction = (prompt: string) => {
