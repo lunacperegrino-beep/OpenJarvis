@@ -22,6 +22,71 @@
 >
 > **[Roadmap](https://open-jarvis.github.io/OpenJarvis/development/roadmap/)**
 
+## Luna's Desktop Polish Branch
+
+This fork branch is an experimental OpenJarvis desktop build focused on making
+the app feel useful as a daily driver, not just as a wrapper around the CLI.
+It keeps the local-first OpenJarvis foundation, then adds practical desktop
+workflows for image generation, audio transcription, file artifacts, and
+health/status visibility.
+
+Branch:
+[`codex/openjarvis-image-artifacts`](https://github.com/lunacperegrino-beep/OpenJarvis/tree/codex/openjarvis-image-artifacts)
+
+Compared with upstream OpenJarvis, this branch adds or improves:
+
+| Area | What changed |
+|------|--------------|
+| Desktop image artifacts | Generated images now render as chat artifacts with preview, file path, Open, Reveal in Finder, Copy, and Regenerate actions. |
+| Draw Things support | The `image_generate` tool defaults to local Draw Things generation, saving images to `~/Pictures/jarvis` when no output path is provided. OpenAI image generation remains available with `provider="openai"`. |
+| Audio upload and transcription | The chat input accepts audio uploads and drag-and-drop audio files, then transcribes them directly in the conversation. |
+| MLX Whisper on Apple Silicon | Adds a fast `mlx-whisper` speech backend for macOS/Apple Silicon, including `large-v3-turbo` support and automatic language detection. |
+| Transcript follow-ups | Follow-up prompts like "format the transcript above" now attach the recent transcript explicitly, so the model should not ask you to paste text it just generated. |
+| Image uploads | The desktop chat can attach image files and display them as file artifacts, even though full visual understanding is not wired into this build yet. |
+| Health/status panel | The system panel shows readiness for the backend API, Ollama, selected model, speech backend, Draw Things, and image folder permissions. |
+| Settings polish | Settings can show the configured default model and active orchestrator tools exposed by the backend. |
+| Safer development flow | Changes are kept as Git savepoints and verified with frontend builds, Python lint checks, and focused tests before pushing. |
+
+### Try This Branch
+
+This branch is not an official upstream release. It is best for macOS users who
+want the desktop app experience with local Ollama, Draw Things, and MLX Whisper.
+
+```bash
+git clone -b codex/openjarvis-image-artifacts https://github.com/lunacperegrino-beep/OpenJarvis.git
+cd OpenJarvis
+
+# Python/backend dependencies
+uv sync --extra server --extra speech-mlx
+
+# Frontend/desktop dependencies
+cd frontend
+npm install
+npm run tauri build
+```
+
+The macOS app bundle is produced at:
+
+```text
+frontend/src-tauri/target/release/bundle/macos/OpenJarvis.app
+```
+
+Optional local tools:
+
+- [Ollama](https://ollama.com/) for local chat models.
+- [Draw Things](https://drawthings.ai/) with its API server enabled for local image generation.
+- Apple Silicon macOS for the fastest `mlx-whisper` transcription path.
+
+If you already have an installed app, keep a backup before replacing it:
+
+```bash
+mv /Applications/OpenJarvis.app /Applications/OpenJarvis.app.backup
+ditto frontend/src-tauri/target/release/bundle/macos/OpenJarvis.app /Applications/OpenJarvis.app
+open /Applications/OpenJarvis.app
+```
+
+The rest of this README is the original OpenJarvis project documentation.
+
 ## Why OpenJarvis?
 
 Personal AI agents are exploding in popularity, but nearly all of them still route intelligence through cloud APIs. Your "personal" AI continues to depend on someone else's server. At the same time, our [Intelligence Per Watt](https://www.intelligence-per-watt.ai/) research showed that local language models already handle 88.7% of single-turn chat and reasoning queries, with intelligence efficiency improving 5.3× from 2023 to 2025. The models and hardware are increasingly ready. What has been missing is the software stack to make local-first personal AI practical.
