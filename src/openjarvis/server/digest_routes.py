@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from typing import Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -22,6 +23,22 @@ class ScheduleUpdate(BaseModel):
 
     enabled: bool
     cron: Optional[str] = None
+    timezone: Optional[str] = None
+
+
+def _artifact_payload(artifact):
+    audio_available = artifact.audio_path.exists() if artifact.audio_path.name else False
+    return {
+        "text": artifact.text,
+        "sections": artifact.sections,
+        "sources_used": artifact.sources_used,
+        "generated_at": artifact.generated_at.isoformat(),
+        "model_used": artifact.model_used,
+        "voice_used": artifact.voice_used,
+        "audio_available": audio_available,
+        "quality_score": artifact.quality_score,
+        "evaluator_feedback": artifact.evaluator_feedback,
+    }
 
 
 def create_digest_router(*, db_path: str = "") -> APIRouter:
@@ -35,17 +52,7 @@ def create_digest_router(*, db_path: str = "") -> APIRouter:
         artifact = store.get_today()
         if artifact is None:
             raise HTTPException(status_code=404, detail="No digest for today")
-        return {
-            "text": artifact.text,
-            "sections": artifact.sections,
-            "sources_used": artifact.sources_used,
-            "generated_at": artifact.generated_at.isoformat(),
-            "model_used": artifact.model_used,
-            "voice_used": artifact.voice_used,
-            "audio_available": (
-                artifact.audio_path.exists() if artifact.audio_path.name else False
-            ),
-        }
+        return _artifact_payload(artifact)
 
     @router.get("/audio")
     async def get_digest_audio():
@@ -53,7 +60,7 @@ def create_digest_router(*, db_path: str = "") -> APIRouter:
         artifact = store.get_today()
         if artifact is None:
             raise HTTPException(status_code=404, detail="No digest for today")
-        if not artifact.audio_path.exists():
+        if not artifact.audio_path.name or not artifact.audio_path.is_file():
             raise HTTPException(status_code=404, detail="Audio not available")
         return FileResponse(
             str(artifact.audio_path),
@@ -69,23 +76,22 @@ def create_digest_router(*, db_path: str = "") -> APIRouter:
 
             with Jarvis() as j:
                 result = j.ask("Generate my morning digest", agent="morning_digest")
-            return {"status": "ok", "text": result}
+            artifact = store.get_latest()
+            return {
+                "status": "ok",
+                "text": result,
+                "artifact": _artifact_payload(artifact) if artifact else None,
+            }
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc))
 
     @router.get("/history")
-    async def get_digest_history():
+    async def get_digest_history(
+        limit: int = Query(default=10, ge=1, le=50),
+    ):
         """Return past digests."""
-        history = store.history(limit=10)
-        return [
-            {
-                "text": a.text[:200],
-                "generated_at": a.generated_at.isoformat(),
-                "model_used": a.model_used,
-                "voice_used": a.voice_used,
-            }
-            for a in history
-        ]
+        history = store.history(limit=limit)
+        return [_artifact_payload(a) for a in history]
 
     @router.get("/schedule")
     async def get_schedule():
@@ -94,6 +100,8 @@ def create_digest_router(*, db_path: str = "") -> APIRouter:
         return {
             "enabled": cfg.digest.enabled,
             "cron": cfg.digest.schedule,
+            "timezone": cfg.digest.timezone,
+            "sections": cfg.digest.sections,
         }
 
     @router.post("/schedule")
@@ -101,9 +109,23 @@ def create_digest_router(*, db_path: str = "") -> APIRouter:
         """Update the digest schedule configuration."""
         cfg = load_config()
         cron = body.cron if body.cron is not None else cfg.digest.schedule
+        timezone = body.timezone.strip() if body.timezone is not None else cfg.digest.timezone
+        if body.timezone is not None:
+            try:
+                ZoneInfo(timezone)
+            except ZoneInfoNotFoundError:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unknown timezone: {timezone}",
+                )
 
         try:
-            _save_digest_schedule(enabled=body.enabled, cron=cron)
+            _save_digest_schedule(
+                enabled=body.enabled,
+                cron=cron,
+                timezone=timezone if body.timezone is not None else None,
+            )
+            load_config.cache_clear()
         except Exception as exc:
             raise HTTPException(
                 status_code=500,
@@ -116,9 +138,12 @@ def create_digest_router(*, db_path: str = "") -> APIRouter:
         else:
             _cancel_scheduler_tasks()
 
+        updated_cfg = load_config()
         return {
-            "enabled": body.enabled,
-            "cron": cron,
+            "enabled": updated_cfg.digest.enabled,
+            "cron": updated_cfg.digest.schedule,
+            "timezone": updated_cfg.digest.timezone,
+            "sections": updated_cfg.digest.sections,
         }
 
     return router

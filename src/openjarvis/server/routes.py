@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import time
 import uuid
 from typing import Any
 
@@ -57,6 +59,7 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
         config is not None
         and memory_backend is not None
         and config.agent.context_from_memory
+        and not request_body.no_memory
         and request_body.messages
     ):
         try:
@@ -250,12 +253,24 @@ def _handle_agent(
 
     # Override agent model for this request if the caller specified one
     original_model = agent._model
+    had_temperature = hasattr(agent, "_temperature")
+    had_max_tokens = hasattr(agent, "_max_tokens")
+    original_temperature = getattr(agent, "_temperature", None)
+    original_max_tokens = getattr(agent, "_max_tokens", None)
     if model:
         agent._model = model
+    if hasattr(agent, "_temperature"):
+        agent._temperature = req.temperature
+    if hasattr(agent, "_max_tokens"):
+        agent._max_tokens = req.max_tokens
     try:
         result = agent.run(input_text, context=ctx)
     finally:
         agent._model = original_model
+        if had_temperature:
+            agent._temperature = original_temperature
+        if had_max_tokens:
+            agent._max_tokens = original_max_tokens
 
     usage = UsageInfo(
         prompt_tokens=result.metadata.get("prompt_tokens", 0),
@@ -778,6 +793,221 @@ async def channel_status(request: Request):
     return {"status": bridge.status().value}
 
 
+_CHANNEL_LABELS = {
+    "sendblue": "iMessage / SMS (SendBlue)",
+    "slack": "Slack",
+    "telegram": "Telegram",
+    "signal": "Signal",
+    "whatsapp": "WhatsApp Cloud API",
+    "whatsapp_baileys": "WhatsApp Local Bridge",
+    "discord": "Discord",
+    "teams": "Microsoft Teams",
+    "email": "Email",
+    "webhook": "Webhook",
+    "google_chat": "Google Chat",
+    "bluebubbles": "BlueBubbles iMessage",
+}
+
+_CHANNEL_REQUIRED_FIELDS = {
+    "sendblue": ["api_key_id", "api_secret_key", "from_number"],
+    "slack": ["bot_token", "app_token"],
+    "telegram": ["bot_token"],
+    "signal": ["api_url", "phone_number"],
+    "whatsapp": ["access_token", "phone_number_id"],
+    "whatsapp_baileys": ["auth_dir"],
+    "discord": ["bot_token"],
+    "teams": ["app_id", "app_password", "service_url"],
+    "email": ["smtp_host", "imap_host", "username", "password"],
+    "webhook": ["url"],
+    "google_chat": ["webhook_url"],
+    "bluebubbles": ["url", "password"],
+}
+
+_PRIORITY_CHANNELS = [
+    "sendblue",
+    "slack",
+    "telegram",
+    "signal",
+    "whatsapp",
+    "discord",
+    "teams",
+]
+
+
+def _truthy(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    return bool(value)
+
+
+def _binding_target(binding: dict[str, Any]) -> str:
+    config = binding.get("config") or {}
+    for key in (
+        "channel",
+        "chat_id",
+        "phone",
+        "phone_number",
+        "from_number",
+        "to_number",
+        "target",
+        "conversation_id",
+    ):
+        value = config.get(key)
+        if _truthy(value):
+            return str(value)
+    return ""
+
+
+def _binding_preview(binding: dict[str, Any]) -> dict[str, Any]:
+    config = binding.get("config") or {}
+    visible_keys = [
+        key
+        for key, value in config.items()
+        if _truthy(value)
+        and not any(token in key.lower() for token in ("token", "secret", "password", "key"))
+    ]
+    secret_keys = [
+        key
+        for key, value in config.items()
+        if _truthy(value)
+        and any(token in key.lower() for token in ("token", "secret", "password", "key"))
+    ]
+    return {
+        "visible_keys": visible_keys,
+        "secret_keys": secret_keys,
+        "target": _binding_target(binding),
+    }
+
+
+def _configured_fields_for_config(channel_config: Any, key: str) -> tuple[list[str], list[str]]:
+    required = _CHANNEL_REQUIRED_FIELDS.get(key, [])
+    sub_config = getattr(channel_config, key, None)
+    present: list[str] = []
+    missing: list[str] = []
+    for field in required:
+        value = getattr(sub_config, field, "") if sub_config is not None else ""
+        if _truthy(value):
+            present.append(field)
+        else:
+            missing.append(field)
+    return present, missing
+
+
+def _sendblue_config_fields(bindings: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
+    present: set[str] = set()
+    for env_key, field in (
+        ("SENDBLUE_API_KEY_ID", "api_key_id"),
+        ("SENDBLUE_API_SECRET_KEY", "api_secret_key"),
+        ("SENDBLUE_FROM_NUMBER", "from_number"),
+    ):
+        if _truthy(os.environ.get(env_key, "")):
+            present.add(field)
+    for binding in bindings:
+        if binding.get("channel_type") != "sendblue":
+            continue
+        config = binding.get("config") or {}
+        for field in _CHANNEL_REQUIRED_FIELDS["sendblue"]:
+            if _truthy(config.get(field)):
+                present.add(field)
+    missing = [field for field in _CHANNEL_REQUIRED_FIELDS["sendblue"] if field not in present]
+    return sorted(present), missing
+
+
+@router.get("/v1/channels/overview")
+async def channels_overview(request: Request):
+    """Return channel adapter, bridge, and agent binding status for desktop."""
+    import openjarvis.channels  # noqa: F401 - trigger channel registration
+    from openjarvis.core.registry import ChannelRegistry
+
+    bridge = getattr(request.app.state, "channel_bridge", None)
+    config = getattr(request.app.state, "config", None)
+    channel_config = getattr(config, "channel", None)
+    manager = getattr(request.app.state, "agent_manager", None)
+
+    active_adapters: list[str] = []
+    bridge_channels: list[str] = []
+    bridge_status = "not_configured"
+    bridge_message = ""
+    if bridge is not None:
+        try:
+            bridge_status = bridge.status().value
+        except Exception as exc:
+            bridge_status = "error"
+            bridge_message = str(exc)
+        try:
+            bridge_channels = list(bridge.list_channels())
+        except Exception as exc:
+            bridge_message = str(exc)
+        active = getattr(bridge, "_channels", None)
+        if isinstance(active, dict):
+            active_adapters = sorted(str(key) for key in active.keys())
+
+    agents = manager.list_agents() if manager is not None else []
+    bindings: list[dict[str, Any]] = []
+    for agent in agents:
+        try:
+            rows = manager.list_channel_bindings(agent["id"])
+        except Exception:
+            rows = []
+        for binding in rows:
+            bindings.append(
+                {
+                    "id": binding.get("id", ""),
+                    "agent_id": binding.get("agent_id", ""),
+                    "agent_name": agent.get("name", ""),
+                    "agent_status": agent.get("status", ""),
+                    "channel_type": binding.get("channel_type", ""),
+                    "routing_mode": binding.get("routing_mode", ""),
+                    "session_id": binding.get("session_id", ""),
+                    "config_preview": _binding_preview(binding),
+                }
+            )
+
+    registered = sorted(ChannelRegistry.keys())
+    supported_keys = list(dict.fromkeys([*_PRIORITY_CHANNELS, *registered]))
+    supported: list[dict[str, Any]] = []
+    for key in supported_keys:
+        if key == "sendblue":
+            present, missing = _sendblue_config_fields(bindings)
+        elif channel_config is not None:
+            present, missing = _configured_fields_for_config(channel_config, key)
+        else:
+            present, missing = [], _CHANNEL_REQUIRED_FIELDS.get(key, [])
+        required = _CHANNEL_REQUIRED_FIELDS.get(key, [])
+        configured = bool(required) and len(missing) == 0
+        active = key in active_adapters
+        bound_count = sum(1 for binding in bindings if binding["channel_type"] == key)
+        supported.append(
+            {
+                "type": key,
+                "name": _CHANNEL_LABELS.get(key, key.replace("_", " ").title()),
+                "priority": key in _PRIORITY_CHANNELS,
+                "registered": key in registered,
+                "configured": configured,
+                "active": active,
+                "bound_agents": bound_count,
+                "required_fields": required,
+                "present_fields": present,
+                "missing_fields": missing,
+            }
+        )
+
+    return {
+        "checked_at": int(time.time() * 1000),
+        "bridge": {
+            "configured": bridge is not None,
+            "status": bridge_status,
+            "message": bridge_message,
+            "active_adapters": active_adapters,
+            "channels": bridge_channels,
+        },
+        "bindings": bindings,
+        "supported": supported,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Security scan endpoint
 # ---------------------------------------------------------------------------
@@ -802,6 +1032,30 @@ async def security_scan():
             }
             for r in results
         ],
+    }
+
+
+@router.get("/v1/diagnostics/doctor")
+async def diagnostics_doctor():
+    """Run the same read-only checks as ``jarvis doctor --json``."""
+    from openjarvis.cli.doctor_cmd import _results_to_dicts, _run_all_checks
+
+    checks = _results_to_dicts(_run_all_checks())
+    ok_count = sum(1 for check in checks if check.get("status") == "ok")
+    warn_count = sum(1 for check in checks if check.get("status") == "warn")
+    fail_count = sum(1 for check in checks if check.get("status") == "fail")
+
+    return {
+        "checked_at": int(time.time() * 1000),
+        "status": "fail" if fail_count else "warn" if warn_count else "ok",
+        "summary": {
+            "ok": ok_count,
+            "warn": warn_count,
+            "fail": fail_count,
+        },
+        "has_warnings": warn_count > 0,
+        "has_failures": fail_count > 0,
+        "checks": checks,
     }
 
 

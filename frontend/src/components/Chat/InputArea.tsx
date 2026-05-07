@@ -1,6 +1,16 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import type { ReactNode } from 'react';
-import { Send, Square, Paperclip, FileAudio, Image as ImageIcon, X, Loader2 } from 'lucide-react';
+import {
+  Send,
+  Square,
+  Paperclip,
+  FileAudio,
+  Image as ImageIcon,
+  X,
+  Loader2,
+  SlidersHorizontal,
+  RotateCcw,
+} from 'lucide-react';
 import { toast } from 'sonner';
 import { useAppStore, generateId } from '../../lib/store';
 import { streamChat } from '../../lib/sse';
@@ -11,10 +21,43 @@ import { AttachmentCard } from './AttachmentCard';
 import { useSpeech } from '../../hooks/useSpeech';
 import type { ChatAttachment, ChatMessage, ToolCallInfo, TokenUsage, MessageTelemetry } from '../../types';
 
+interface AdvancedOptions {
+  model: string;
+  temperature: string;
+  maxTokens: string;
+  systemPrompt: string;
+  noContext: boolean;
+  jsonMode: boolean;
+}
+
+const DEFAULT_ADVANCED_OPTIONS: AdvancedOptions = {
+  model: '',
+  temperature: '',
+  maxTokens: '',
+  systemPrompt: '',
+  noContext: false,
+  jsonMode: false,
+};
+
+const CLOUD_MODEL_PRESETS = [
+  'gpt-4o',
+  'gpt-4o-mini',
+  'o3-mini',
+  'claude-sonnet-4-6',
+  'claude-opus-4-6',
+  'claude-haiku-4-5',
+  'gemini-2.5-pro',
+  'gemini-2.5-flash',
+  'gemini-3-pro',
+  'openrouter/auto',
+];
+
 export function InputArea() {
   const [input, setInput] = useState('');
   const [pendingAttachments, setPendingAttachments] = useState<ChatAttachment[]>([]);
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [advancedOptions, setAdvancedOptions] = useState<AdvancedOptions>(DEFAULT_ADVANCED_OPTIONS);
   const [uploadingAudio, setUploadingAudio] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const dropZoneRef = useRef<HTMLDivElement>(null);
@@ -28,6 +71,7 @@ export function InputArea() {
 
   const activeId = useAppStore((s) => s.activeId);
   const selectedModel = useAppStore((s) => s.selectedModel);
+  const models = useAppStore((s) => s.models);
   const streamState = useAppStore((s) => s.streamState);
   const speechEnabled = useAppStore((s) => s.settings.speechEnabled);
   const maxTokens = useAppStore((s) => s.settings.maxTokens);
@@ -63,6 +107,15 @@ export function InputArea() {
     : !speechAvailable ? 'no-backend'
     : streamState.isStreaming ? 'streaming'
     : undefined;
+  const advancedActive = isAdvancedOptionsActive(advancedOptions);
+  const modelChoices = buildAdvancedModelChoices(models.map((model) => model.id), selectedModel);
+
+  const updateAdvancedOption = useCallback(<K extends keyof AdvancedOptions,>(
+    key: K,
+    value: AdvancedOptions[K],
+  ) => {
+    setAdvancedOptions((prev) => ({ ...prev, [key]: value }));
+  }, []);
 
   const handleMicClick = useCallback(async () => {
     if (speechState === 'recording') {
@@ -366,6 +419,9 @@ export function InputArea() {
       attachments.length > 0 &&
       attachments.every((attachment) => attachment.kind === 'image');
     const displayContent = content || formatAttachmentOnlyMessage(attachments);
+    const effectiveModel = advancedOptions.model.trim() || selectedModel || models[0]?.id || '';
+    const effectiveTemperature = parseAdvancedTemperature(advancedOptions.temperature, temperature);
+    const effectiveMaxTokens = parseAdvancedMaxTokens(advancedOptions.maxTokens, maxTokens);
 
     setInput('');
     if (!overrideAttachments) setPendingAttachments([]);
@@ -373,7 +429,7 @@ export function InputArea() {
 
     let convId = activeId;
     if (!convId) {
-      convId = createConversation(selectedModel);
+      convId = createConversation(effectiveModel);
     }
 
     const userMsg: ChatMessage = {
@@ -414,7 +470,11 @@ export function InputArea() {
 
     // Build API messages before adding assistant placeholder
     const currentMessages = useAppStore.getState().messages;
-    const apiMessages = buildApiMessages(currentMessages, hiddenTranscriptContext);
+    const apiMessages = buildApiMessages(currentMessages, hiddenTranscriptContext, {
+      noContext: advancedOptions.noContext,
+      systemPrompt: advancedOptions.systemPrompt,
+      jsonMode: advancedOptions.jsonMode,
+    });
 
     const assistantMsg: ChatMessage = {
       id: generateId(),
@@ -452,12 +512,19 @@ export function InputArea() {
       timestamp: Date.now(),
       level: 'info',
       category: 'chat',
-      message: `Request: "${displayContent.slice(0, 80)}${displayContent.length > 80 ? '...' : ''}" → ${selectedModel}`,
+      message: `Request: "${displayContent.slice(0, 80)}${displayContent.length > 80 ? '...' : ''}" → ${effectiveModel}`,
     });
 
     try {
       for await (const sseEvent of streamChat(
-        { model: selectedModel, messages: apiMessages, stream: true, temperature, max_tokens: maxTokens },
+        {
+          model: effectiveModel,
+          messages: apiMessages,
+          stream: true,
+          temperature: effectiveTemperature,
+          max_tokens: effectiveMaxTokens,
+          no_memory: advancedOptions.noContext,
+        },
         controller.signal,
       )) {
         const eventName = sseEvent.event;
@@ -468,7 +535,7 @@ export function InputArea() {
           setStreamState({ phase: 'Generating...' });
           useAppStore.getState().addLogEntry({
             timestamp: Date.now(), level: 'info', category: 'chat',
-            message: `Generating with ${selectedModel}...`,
+            message: `Generating with ${effectiveModel}...`,
           });
         } else if (eventName === 'tool_call_start') {
           try {
@@ -552,10 +619,10 @@ export function InputArea() {
       }
       const totalMs = Date.now() - startTime;
       const _CLOUD_PREFIXES = ['gpt-', 'o1-', 'o3-', 'o4-', 'claude-', 'gemini-', 'openrouter/', 'MiniMax-', 'chatgpt-'];
-      const engineLabel = _CLOUD_PREFIXES.some(p => selectedModel.startsWith(p)) ? 'cloud' : 'ollama';
+      const engineLabel = _CLOUD_PREFIXES.some(p => effectiveModel.startsWith(p)) ? 'cloud' : 'ollama';
       const telemetry: MessageTelemetry = {
         engine: engineLabel,
-        model_id: selectedModel,
+        model_id: effectiveModel,
         total_ms: totalMs,
         ttft_ms: ttftMs,
         tokens_per_sec: usage?.completion_tokens
@@ -617,6 +684,8 @@ export function InputArea() {
     resetStream,
     temperature,
     maxTokens,
+    advancedOptions,
+    models,
   ]);
 
   useEffect(() => {
@@ -768,6 +837,17 @@ export function InputArea() {
           boxShadow: dragActive ? '0 0 0 3px var(--color-accent-subtle)' : 'var(--shadow-sm)',
         }}
       >
+        {advancedOpen && (
+          <AdvancedOptionsPanel
+            options={advancedOptions}
+            modelChoices={modelChoices}
+            selectedModel={selectedModel}
+            defaultTemperature={temperature}
+            defaultMaxTokens={maxTokens}
+            onChange={updateAdvancedOption}
+            onReset={() => setAdvancedOptions(DEFAULT_ADVANCED_OPTIONS)}
+          />
+        )}
         <div className="relative">
           <button
             type="button"
@@ -826,6 +906,19 @@ export function InputArea() {
           </button>
         ) : (
           <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => setAdvancedOpen((open) => !open)}
+              disabled={modelLoading}
+              className="p-2 rounded-xl transition-colors shrink-0 cursor-pointer disabled:opacity-30 disabled:cursor-default"
+              style={{
+                background: advancedOpen || advancedActive ? 'var(--color-bg-tertiary)' : 'transparent',
+                color: advancedActive ? 'var(--color-accent)' : 'var(--color-text-tertiary)',
+              }}
+              title="Advanced controls"
+            >
+              <SlidersHorizontal size={16} />
+            </button>
             <MicButton
               state={speechState}
               onClick={handleMicClick}
@@ -910,6 +1003,156 @@ function AttachmentMenuButton({
   );
 }
 
+function AdvancedOptionsPanel({
+  options,
+  modelChoices,
+  selectedModel,
+  defaultTemperature,
+  defaultMaxTokens,
+  onChange,
+  onReset,
+}: {
+  options: AdvancedOptions;
+  modelChoices: string[];
+  selectedModel: string;
+  defaultTemperature: number;
+  defaultMaxTokens: number;
+  onChange: <K extends keyof AdvancedOptions>(key: K, value: AdvancedOptions[K]) => void;
+  onReset: () => void;
+}) {
+  const inputStyle = {
+    background: 'var(--color-bg)',
+    border: '1px solid var(--color-border)',
+    color: 'var(--color-text)',
+  };
+
+  return (
+    <div
+      className="absolute left-0 right-0 bottom-full mb-3 rounded-xl p-3 z-30"
+      style={{
+        background: 'var(--color-bg)',
+        border: '1px solid var(--color-border)',
+        boxShadow: 'var(--shadow-md)',
+      }}
+    >
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2 text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>
+          <SlidersHorizontal size={14} />
+          <span>Advanced</span>
+        </div>
+        <button
+          type="button"
+          onClick={onReset}
+          className="flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] cursor-pointer"
+          style={{ color: 'var(--color-text-tertiary)', background: 'var(--color-bg-secondary)' }}
+          title="Reset advanced controls"
+        >
+          <RotateCcw size={12} />
+          Reset
+        </button>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+        <label className="flex flex-col gap-1 text-[11px]" style={{ color: 'var(--color-text-tertiary)' }}>
+          Model
+          <input
+            list="openjarvis-advanced-models"
+            value={options.model}
+            onChange={(event) => onChange('model', event.currentTarget.value)}
+            placeholder={selectedModel || 'Default'}
+            className="h-9 rounded-lg px-2 text-xs outline-none"
+            style={inputStyle}
+          />
+        </label>
+        <label className="flex flex-col gap-1 text-[11px]" style={{ color: 'var(--color-text-tertiary)' }}>
+          Temperature
+          <input
+            type="number"
+            min="0"
+            max="2"
+            step="0.1"
+            value={options.temperature}
+            onChange={(event) => onChange('temperature', event.currentTarget.value)}
+            placeholder={String(defaultTemperature)}
+            className="h-9 rounded-lg px-2 text-xs outline-none"
+            style={inputStyle}
+          />
+        </label>
+        <label className="flex flex-col gap-1 text-[11px]" style={{ color: 'var(--color-text-tertiary)' }}>
+          Max tokens
+          <input
+            type="number"
+            min="128"
+            max="32768"
+            step="128"
+            value={options.maxTokens}
+            onChange={(event) => onChange('maxTokens', event.currentTarget.value)}
+            placeholder={String(defaultMaxTokens)}
+            className="h-9 rounded-lg px-2 text-xs outline-none"
+            style={inputStyle}
+          />
+        </label>
+      </div>
+
+      <div className="mt-2 flex flex-wrap gap-2">
+        <AdvancedToggle
+          label="No context"
+          active={options.noContext}
+          onClick={() => onChange('noContext', !options.noContext)}
+        />
+        <AdvancedToggle
+          label="JSON"
+          active={options.jsonMode}
+          onClick={() => onChange('jsonMode', !options.jsonMode)}
+        />
+      </div>
+
+      <label className="mt-2 flex flex-col gap-1 text-[11px]" style={{ color: 'var(--color-text-tertiary)' }}>
+        System prompt
+        <textarea
+          value={options.systemPrompt}
+          onChange={(event) => onChange('systemPrompt', event.currentTarget.value)}
+          placeholder="Optional instruction for this request"
+          rows={2}
+          className="rounded-lg px-2 py-2 text-xs outline-none resize-none"
+          style={inputStyle}
+        />
+      </label>
+
+      <datalist id="openjarvis-advanced-models">
+        {modelChoices.map((model) => (
+          <option key={model} value={model} />
+        ))}
+      </datalist>
+    </div>
+  );
+}
+
+function AdvancedToggle({
+  label,
+  active,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="rounded-lg px-2 py-1 text-[11px] cursor-pointer"
+      style={{
+        background: active ? 'var(--color-accent-subtle)' : 'var(--color-bg-secondary)',
+        color: active ? 'var(--color-accent)' : 'var(--color-text-secondary)',
+        border: active ? '1px solid var(--color-accent)' : '1px solid var(--color-border)',
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
 async function pickDesktopAttachment(kind: 'audio' | 'image'): Promise<string | null> {
   const { open } = await import('@tauri-apps/plugin-dialog');
   const selected = await open({
@@ -974,6 +1217,38 @@ function formatAttachmentOnlyMessage(attachments: ChatAttachment[]): string {
   return `Uploaded ${attachments.length} attachments`;
 }
 
+function isAdvancedOptionsActive(options: AdvancedOptions): boolean {
+  return Boolean(
+    options.model.trim() ||
+      options.temperature.trim() ||
+      options.maxTokens.trim() ||
+      options.systemPrompt.trim() ||
+      options.noContext ||
+      options.jsonMode,
+  );
+}
+
+function buildAdvancedModelChoices(installedModels: string[], selectedModel: string): string[] {
+  const allModels = [selectedModel, ...installedModels, ...CLOUD_MODEL_PRESETS]
+    .map((model) => model.trim())
+    .filter(Boolean);
+  return Array.from(new Set(allModels));
+}
+
+function parseAdvancedTemperature(value: string, fallback: number): number {
+  if (!value.trim()) return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(2, Math.max(0, parsed));
+}
+
+function parseAdvancedMaxTokens(value: string, fallback: number): number {
+  if (!value.trim()) return fallback;
+  const parsed = Math.round(Number(value));
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(32768, Math.max(128, parsed));
+}
+
 function buildApiMessageContent(content: string, attachments?: ChatAttachment[]): string {
   if (!attachments?.length) return content;
   const attachmentNotes = attachments.flatMap((attachment) => {
@@ -988,14 +1263,44 @@ function buildApiMessageContent(content: string, attachments?: ChatAttachment[])
   return [content, ...attachmentNotes].filter(Boolean).join('\n\n');
 }
 
+function buildAdvancedSystemMessages(
+  options: BuildApiMessageOptions,
+): Array<{ role: string; content: string }> {
+  const systemMessages: Array<{ role: string; content: string }> = [];
+  const systemPrompt = options.systemPrompt?.trim();
+  if (systemPrompt) {
+    systemMessages.push({ role: 'system', content: systemPrompt });
+  }
+  if (options.jsonMode) {
+    systemMessages.push({
+      role: 'system',
+      content: 'Return valid JSON only. Do not wrap the JSON in Markdown.',
+    });
+  }
+  if (options.noContext) {
+    systemMessages.push({
+      role: 'system',
+      content: 'Answer only from this request. Do not rely on previous chat turns or saved memories.',
+    });
+  }
+  return systemMessages;
+}
+
 interface TranscriptArtifact {
   index: number;
   content: string;
 }
 
+interface BuildApiMessageOptions {
+  noContext?: boolean;
+  systemPrompt?: string;
+  jsonMode?: boolean;
+}
+
 function buildApiMessages(
   messages: ChatMessage[],
   hiddenTranscriptContext?: string,
+  options: BuildApiMessageOptions = {},
 ): Array<{ role: string; content: string }> {
   const lastUserIndex = findLastUserIndex(messages);
   const lastUser = lastUserIndex >= 0 ? messages[lastUserIndex] : null;
@@ -1007,7 +1312,7 @@ function buildApiMessages(
       ? findRecentTranscriptArtifact(messages, lastUserIndex)
       : null);
 
-  return messages.map((message, index) => {
+  const apiMessages = messages.map((message, index) => {
     let content = buildApiMessageContent(message.content, message.attachments);
 
     if (transcript && transcript.index >= 0 && index === transcript.index) {
@@ -1023,9 +1328,26 @@ function buildApiMessages(
 
     return { role: message.role, content };
   });
+  const systemMessages = buildAdvancedSystemMessages(options);
+
+  if (options.noContext) {
+    const lastApiUserIndex = findLastApiUserIndex(apiMessages);
+    return lastApiUserIndex >= 0
+      ? [...systemMessages, apiMessages[lastApiUserIndex]]
+      : systemMessages;
+  }
+
+  return [...systemMessages, ...apiMessages];
 }
 
 function findLastUserIndex(messages: ChatMessage[]): number {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].role === 'user') return index;
+  }
+  return -1;
+}
+
+function findLastApiUserIndex(messages: Array<{ role: string; content: string }>): number {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     if (messages[index].role === 'user') return index;
   }

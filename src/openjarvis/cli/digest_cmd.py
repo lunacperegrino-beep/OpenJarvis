@@ -31,7 +31,11 @@ def _play_audio(audio_path: str) -> None:
             continue
 
 
-def _save_digest_schedule(enabled: bool, cron: str) -> None:
+def _save_digest_schedule(
+    enabled: bool,
+    cron: str,
+    timezone: Optional[str] = None,
+) -> None:
     """Persist digest schedule to config.toml."""
     config_path = DEFAULT_CONFIG_PATH
 
@@ -55,13 +59,19 @@ def _save_digest_schedule(enabled: bool, cron: str) -> None:
             new_lines.append("[digest]")
             new_lines.append(f"enabled = {str(enabled).lower()}")
             new_lines.append(f'schedule = "{cron}"')
+            if timezone is not None:
+                new_lines.append(f'timezone = "{timezone}"')
             continue
         # If inside [digest], skip old enabled/schedule keys
         if in_digest:
             if stripped.startswith("[") and stripped != "[digest]":
                 in_digest = False
                 new_lines.append(line)
-            elif stripped.startswith("enabled") or stripped.startswith("schedule"):
+            elif (
+                stripped.startswith("enabled")
+                or stripped.startswith("schedule")
+                or (timezone is not None and stripped.startswith("timezone"))
+            ):
                 continue
             else:
                 new_lines.append(line)
@@ -75,6 +85,8 @@ def _save_digest_schedule(enabled: bool, cron: str) -> None:
         new_lines.append("[digest]")
         new_lines.append(f"enabled = {str(enabled).lower()}")
         new_lines.append(f'schedule = "{cron}"')
+        if timezone is not None:
+            new_lines.append(f'timezone = "{timezone}"')
         new_lines.append("")
 
     config_path.parent.mkdir(parents=True, exist_ok=True)

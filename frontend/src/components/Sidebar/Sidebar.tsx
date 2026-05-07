@@ -18,6 +18,10 @@ import {
   ScrollText,
   Database,
   Archive,
+  Stethoscope,
+  History,
+  Wifi,
+  CalendarDays,
 } from 'lucide-react';
 import { ConversationList } from './ConversationList';
 import { useAppStore } from '../../lib/store';
@@ -57,7 +61,11 @@ export function Sidebar() {
     { path: '/dashboard', icon: BarChart3, label: 'Dashboard' },
     { path: '/data-sources', icon: Database, label: 'Data Sources' },
     { path: '/agents', icon: Bot, label: 'Agents' },
+    { path: '/tasks', icon: History, label: 'Tasks' },
+    { path: '/channels', icon: Wifi, label: 'Channels' },
+    { path: '/digest', icon: CalendarDays, label: 'Daily Brief' },
     { path: '/artifacts', icon: Archive, label: 'Artifacts' },
+    { path: '/diagnostics', icon: Stethoscope, label: 'Diagnostics' },
     { path: '/logs', icon: ScrollText, label: 'Logs' },
     { path: '/settings', icon: Settings, label: 'Settings' },
     { path: '/get-started', icon: Rocket, label: 'Get Started' },

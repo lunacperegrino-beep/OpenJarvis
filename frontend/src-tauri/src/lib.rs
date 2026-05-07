@@ -124,6 +124,7 @@ fn resolve_bin(name: &str) -> String {
         format!("{home}/.local/bin/{name}"),
         format!("{home}/.cargo/bin/{name}"),
         format!("/usr/local/bin/{name}"),
+        format!("/usr/sbin/{name}"),
         format!("/usr/bin/{name}"),
     ];
 
@@ -315,6 +316,35 @@ impl BackendManager {
 }
 
 type SharedBackend = Arc<Mutex<BackendManager>>;
+
+#[cfg(target_os = "macos")]
+async fn kill_listeners_on_port(port: u16) {
+    let lsof_bin = resolve_bin("lsof");
+    let port_filter = format!("tcp:{port}");
+    let output = tokio::process::Command::new(&lsof_bin)
+        .args(["-ti", &port_filter, "-sTCP:LISTEN"])
+        .output()
+        .await;
+
+    let Ok(output) = output else {
+        return;
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let pids: Vec<String> = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && line.chars().all(|ch| ch.is_ascii_digit()))
+        .map(str::to_string)
+        .collect();
+
+    for pid in pids {
+        let _ = tokio::process::Command::new("kill")
+            .args(["-TERM", &pid])
+            .status()
+            .await;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Setup status (reported to frontend)
@@ -599,10 +629,7 @@ async fn boot_backend(backend: SharedBackend, status: SharedStatus) {
                     s.error = Some(format!(
                         "Failed to download OpenJarvis: {}. \
                          Clone manually: git clone -b {} {} {}",
-                        e,
-                        LUNA_FORK_BRANCH,
-                        LUNA_FORK_REPO,
-                        clone_target,
+                        e, LUNA_FORK_BRANCH, LUNA_FORK_REPO, clone_target,
                     ));
                     return;
                 }
@@ -632,7 +659,12 @@ async fn boot_backend(backend: SharedBackend, status: SharedStatus) {
             .is_ok()
         {
             // Something is already listening — try to kill it
-            #[cfg(unix)]
+            #[cfg(target_os = "macos")]
+            {
+                kill_listeners_on_port(JARVIS_PORT).await;
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            #[cfg(all(unix, not(target_os = "macos")))]
             {
                 let _ = tokio::process::Command::new("fuser")
                     .args(["-k", &format!("{}/tcp", JARVIS_PORT)])

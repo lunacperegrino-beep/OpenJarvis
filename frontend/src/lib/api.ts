@@ -211,6 +211,113 @@ export interface RuntimeReadiness {
   items: RuntimeReadinessItem[];
 }
 
+export interface DoctorCheck {
+  name: string;
+  status: 'ok' | 'warn' | 'fail';
+  message: string;
+  details?: string | null;
+}
+
+export interface DoctorReport {
+  checked_at: number;
+  status: 'ok' | 'warn' | 'fail';
+  summary: {
+    ok: number;
+    warn: number;
+    fail: number;
+  };
+  has_warnings: boolean;
+  has_failures: boolean;
+  checks: DoctorCheck[];
+}
+
+export interface SecurityFinding {
+  name: string;
+  status: 'ok' | 'warn' | 'fail';
+  message: string;
+  platform?: string;
+}
+
+export interface SecurityScanReport {
+  has_warnings: boolean;
+  has_failures: boolean;
+  findings: SecurityFinding[];
+}
+
+export interface ChannelDiagnostics {
+  status: string;
+  channels: Array<Record<string, unknown>>;
+  message?: string;
+}
+
+export interface ChannelOverviewItem {
+  type: string;
+  name: string;
+  priority: boolean;
+  registered: boolean;
+  configured: boolean;
+  active: boolean;
+  bound_agents: number;
+  required_fields: string[];
+  present_fields: string[];
+  missing_fields: string[];
+}
+
+export interface ChannelBindingPreview {
+  visible_keys: string[];
+  secret_keys: string[];
+  target: string;
+}
+
+export interface ChannelOverviewBinding {
+  id: string;
+  agent_id: string;
+  agent_name: string;
+  agent_status: string;
+  channel_type: string;
+  routing_mode: string;
+  session_id: string;
+  config_preview: ChannelBindingPreview;
+}
+
+export interface ChannelOverview {
+  checked_at: number;
+  bridge: {
+    configured: boolean;
+    status: string;
+    message?: string;
+    active_adapters: string[];
+    channels: string[];
+  };
+  bindings: ChannelOverviewBinding[];
+  supported: ChannelOverviewItem[];
+}
+
+export interface DigestArtifact {
+  text: string;
+  sections: Record<string, string>;
+  sources_used: string[];
+  generated_at: string;
+  model_used: string;
+  voice_used: string;
+  audio_available: boolean;
+  quality_score?: number;
+  evaluator_feedback?: string;
+}
+
+export interface DigestSchedule {
+  enabled: boolean;
+  cron: string;
+  timezone?: string;
+  sections?: string[];
+}
+
+export interface DigestGenerateResult {
+  status: string;
+  text: string;
+  artifact?: DigestArtifact | null;
+}
+
 export async function fetchRuntimeReadiness(selectedModel: string): Promise<RuntimeReadiness> {
   if (isTauri()) {
     return tauriInvoke<RuntimeReadiness>('check_runtime_readiness', { selectedModel });
@@ -302,6 +409,105 @@ export async function fetchRuntimeReadiness(selectedModel: string): Promise<Runt
   });
 
   return { checked_at: checkedAt, api_base: base, items };
+}
+
+export async function fetchDoctorReport(): Promise<DoctorReport> {
+  const res = await fetch(`${getBase()}/v1/diagnostics/doctor`);
+  if (!res.ok) throw new Error(`Failed to run doctor: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchSecurityScan(): Promise<SecurityScanReport> {
+  const res = await fetch(`${getBase()}/v1/security/scan`);
+  if (!res.ok) throw new Error(`Failed to run security scan: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchChannelDiagnostics(): Promise<ChannelDiagnostics> {
+  const res = await fetch(`${getBase()}/v1/channels`);
+  if (!res.ok) throw new Error(`Failed to fetch channels: ${res.status}`);
+  const data = await res.json();
+  return {
+    status: data.status || 'unknown',
+    channels: Array.isArray(data.channels) ? data.channels : [],
+    message: data.message,
+  };
+}
+
+export async function fetchChannelOverview(): Promise<ChannelOverview> {
+  const res = await fetch(`${getBase()}/v1/channels/overview`);
+  if (!res.ok) throw new Error(`Failed to fetch channel overview: ${res.status}`);
+  return res.json();
+}
+
+export async function sendChannelMessage(
+  channel: string,
+  content: string,
+  conversationId = '',
+): Promise<{ status: string; channel: string }> {
+  const res = await fetch(`${getBase()}/v1/channels/send`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      channel,
+      content,
+      conversation_id: conversationId,
+    }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(body.detail || `Failed to send test message: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function fetchTodayDigest(): Promise<DigestArtifact | null> {
+  const res = await fetch(`${getBase()}/api/digest`);
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`Failed to fetch digest: ${res.status}`);
+  return res.json();
+}
+
+export async function generateDigest(): Promise<DigestGenerateResult> {
+  const res = await fetch(`${getBase()}/api/digest/generate`, { method: 'POST' });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(body.detail || `Failed to generate digest: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function fetchDigestHistory(limit = 10): Promise<DigestArtifact[]> {
+  const res = await fetch(`${getBase()}/api/digest/history?limit=${limit}`);
+  if (!res.ok) throw new Error(`Failed to fetch digest history: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchDigestSchedule(): Promise<DigestSchedule> {
+  const res = await fetch(`${getBase()}/api/digest/schedule`);
+  if (!res.ok) throw new Error(`Failed to fetch digest schedule: ${res.status}`);
+  return res.json();
+}
+
+export async function updateDigestSchedule(
+  enabled: boolean,
+  cron?: string,
+  timezone?: string,
+): Promise<DigestSchedule> {
+  const res = await fetch(`${getBase()}/api/digest/schedule`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled, cron, timezone }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(body.detail || `Failed to update digest schedule: ${res.status}`);
+  }
+  return res.json();
+}
+
+export function digestAudioUrl(): string {
+  return `${getBase()}/api/digest/audio`;
 }
 
 export async function checkHealth(): Promise<boolean> {

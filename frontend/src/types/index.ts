@@ -146,6 +146,7 @@ export interface ServerInfo {
   model: string;
   agent: string | null;
   engine: string;
+  active_tools?: Array<{ name: string; category?: string }>;
 }
 
 // --- Log Types ---

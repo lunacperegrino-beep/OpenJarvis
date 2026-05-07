@@ -161,6 +161,10 @@ export function CommandPalette() {
     } catch {}
   };
 
+  useEffect(() => {
+    refreshModels();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   const handlePull = async (modelId: string) => {
     setPulling(modelId);
     setPullError(null);

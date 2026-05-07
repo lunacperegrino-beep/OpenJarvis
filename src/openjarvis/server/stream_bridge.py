@@ -203,12 +203,24 @@ class AgentStreamBridge:
 
         # Override agent model for this request if the caller specified one
         original_model = self._agent._model
+        had_temperature = hasattr(self._agent, "_temperature")
+        had_max_tokens = hasattr(self._agent, "_max_tokens")
+        original_temperature = getattr(self._agent, "_temperature", None)
+        original_max_tokens = getattr(self._agent, "_max_tokens", None)
         if self._model:
             self._agent._model = self._model
+        if hasattr(self._agent, "_temperature"):
+            self._agent._temperature = self._request.temperature
+        if hasattr(self._agent, "_max_tokens"):
+            self._agent._max_tokens = self._request.max_tokens
         try:
             return self._agent.run(input_text, context=ctx)
         finally:
             self._agent._model = original_model
+            if had_temperature:
+                self._agent._temperature = original_temperature
+            if had_max_tokens:
+                self._agent._max_tokens = original_max_tokens
 
     # ------------------------------------------------------------------
     # Public streaming interface

@@ -9,6 +9,10 @@ import { AgentsPage } from './pages/AgentsPage';
 import { DataSourcesPage } from './pages/DataSourcesPage';
 import { LogsPage } from './pages/LogsPage';
 import { ArtifactsPage } from './pages/ArtifactsPage';
+import { DiagnosticsPage } from './pages/DiagnosticsPage';
+import { BackgroundTasksPage } from './pages/BackgroundTasksPage';
+import { ChannelsPage } from './pages/ChannelsPage';
+import { DailyDigestPage } from './pages/DailyDigestPage';
 import { CommandPalette } from './components/CommandPalette';
 import { SetupScreen } from './components/SetupScreen';
 import { Toaster } from './components/ui/sonner';
@@ -55,20 +59,33 @@ export default function App() {
     return () => clearInterval(interval);
   }, [importOverlay]);
 
-  // Fetch models on mount
+  // Fetch models once desktop setup is ready. In Tauri the backend may still be
+  // starting during the first render, so loading before setup completes can
+  // leave the picker permanently empty.
   useEffect(() => {
+    if (!setupDone) return;
+    let cancelled = false;
+    setModelsLoading(true);
     fetchModels()
       .then((m) => {
+        if (cancelled) return;
         setModels(m);
-        if (!selectedModel && m.length > 0) {
-          const { settings: s } = useAppStore.getState();
+        const { settings: s, selectedModel: currentModel } = useAppStore.getState();
+        if (!currentModel && m.length > 0) {
           const preferred = s.defaultModel && m.find((x) => x.id === s.defaultModel);
           setSelectedModel(preferred ? preferred.id : m[0].id);
         }
       })
-      .catch(() => setModels([]))
-      .finally(() => setModelsLoading(false));
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+      .catch(() => {
+        if (!cancelled) setModels([]);
+      })
+      .finally(() => {
+        if (!cancelled) setModelsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [setupDone]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch server info
   useEffect(() => {
@@ -182,7 +199,11 @@ export default function App() {
           <Route path="get-started" element={<GetStartedPage />} />
           <Route path="data-sources" element={<DataSourcesPage />} />
           <Route path="agents" element={<AgentsPage />} />
+          <Route path="tasks" element={<BackgroundTasksPage />} />
+          <Route path="channels" element={<ChannelsPage />} />
+          <Route path="digest" element={<DailyDigestPage />} />
           <Route path="artifacts" element={<ArtifactsPage />} />
+          <Route path="diagnostics" element={<DiagnosticsPage />} />
           <Route path="logs" element={<LogsPage />} />
         </Route>
       </Routes>
