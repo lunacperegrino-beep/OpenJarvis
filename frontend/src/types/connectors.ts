@@ -339,6 +339,41 @@ export const SOURCE_CATALOG: ConnectorMeta[] = [
     ],
   },
   {
+    connector_id: 'apple_music',
+    display_name: 'Apple Music',
+    auth_type: 'local',
+    category: 'other',
+    icon: 'Music',
+    color: 'text-pink-400',
+    description: 'Local Music.app library and play history',
+    unitLabel: 'tracks',
+    steps: [
+      {
+        label: 'Open Music.app once and leave it running while OpenJarvis syncs your library.',
+      },
+      {
+        label: 'If macOS asks whether OpenJarvis can control Music, click OK. If it already denied access, open System Settings > Privacy & Security > Automation and enable Music under OpenJarvis.',
+      },
+      {
+        label: 'Return here and click Sync Now. OpenJarvis reads track metadata locally; no Apple account credentials are needed.',
+      },
+    ],
+    troubleshooting: [
+      'If sync still fails, quit and reopen Music.app, then restart OpenJarvis.',
+      'Very large Music libraries can take a little while on the first sync.',
+    ],
+  },
+  {
+    connector_id: 'hackernews',
+    display_name: 'Hacker News',
+    auth_type: 'local',
+    category: 'other',
+    icon: 'Newspaper',
+    color: 'text-orange-400',
+    description: 'Public top technology stories from Hacker News',
+    unitLabel: 'stories',
+  },
+  {
     connector_id: 'apple_notes',
     display_name: 'Apple Notes',
     auth_type: 'local',

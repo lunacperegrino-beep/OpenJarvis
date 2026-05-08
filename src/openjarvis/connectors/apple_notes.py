@@ -102,6 +102,29 @@ def _extract_text_from_zdata(zdata: bytes) -> str:
     return cleaned.strip()
 
 
+def _notes_database_error(exc: sqlite3.OperationalError) -> str:
+    """Return a user-facing explanation for Notes database access failures."""
+    raw = str(exc)
+    lowered = raw.lower()
+    if (
+        "unable to open database file" in lowered
+        or "authorization denied" in lowered
+        or "not authorized" in lowered
+        or "permission" in lowered
+    ):
+        return (
+            "Cannot read Apple Notes. Give OpenJarvis Full Disk Access in "
+            "System Settings > Privacy & Security > Full Disk Access, then "
+            "restart OpenJarvis and sync again."
+        )
+    if "no such table" in lowered or "no such column" in lowered:
+        return (
+            "Apple Notes database schema was not recognized. Open Apple Notes, "
+            "let iCloud finish syncing, then try again."
+        )
+    return f"Cannot read Apple Notes database: {raw}"
+
+
 # ---------------------------------------------------------------------------
 # AppleNotesConnector
 # ---------------------------------------------------------------------------
@@ -128,6 +151,8 @@ class AppleNotesConnector(BaseConnector):
         self._items_synced: int = 0
         self._items_total: int = 0
         self._last_sync: Optional[datetime] = None
+        self._state: str = "idle"
+        self._error: Optional[str] = None
 
     # ------------------------------------------------------------------
     # BaseConnector interface
@@ -140,6 +165,8 @@ class AppleNotesConnector(BaseConnector):
     def disconnect(self) -> None:
         """Mark the connector as disconnected."""
         self._connected = False
+        self._state = "idle"
+        self._error = None
 
     def sync(
         self,
@@ -164,10 +191,22 @@ class AppleNotesConnector(BaseConnector):
             One document per note, with gzip-decompressed plain-text content.
         """
         db_path = str(self._db_path)
+        self._state = "syncing"
+        self._error = None
+
+        if not self._db_path.exists():
+            self._state = "error"
+            self._error = (
+                "Apple Notes database was not found. Open Apple Notes once, "
+                "then try syncing again."
+            )
+            return
 
         try:
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as exc:
+            self._state = "error"
+            self._error = _notes_database_error(exc)
             return
 
         try:
@@ -190,6 +229,10 @@ class AppleNotesConnector(BaseConnector):
                     "JOIN ZICNOTEDATA d ON d.ZNOTE = n.Z_PK "
                     "ORDER BY n.ZMODIFICATIONDATE ASC"
                 ).fetchall()
+            except sqlite3.OperationalError as exc:
+                self._state = "error"
+                self._error = _notes_database_error(exc)
+                return
 
             self._items_total = len(rows)
             synced = 0
@@ -224,7 +267,9 @@ class AppleNotesConnector(BaseConnector):
                 yield doc
 
             self._items_synced = synced
+            self._state = "idle"
             self._last_sync = datetime.now(tz=timezone.utc)
+            self._error = None
 
         finally:
             conn.close()
@@ -232,10 +277,11 @@ class AppleNotesConnector(BaseConnector):
     def sync_status(self) -> SyncStatus:
         """Return sync progress from the most recent :meth:`sync` call."""
         return SyncStatus(
-            state="idle",
+            state=self._state,
             items_synced=self._items_synced,
             items_total=self._items_total,
             last_sync=self._last_sync,
+            error=self._error,
         )
 
     # ------------------------------------------------------------------

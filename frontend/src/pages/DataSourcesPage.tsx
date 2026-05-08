@@ -19,7 +19,7 @@ import { getBase, isTauri } from '../lib/api';
 import {
   Database, MessageSquare, Loader2, Brain, Search, FolderOpen, FileText,
   Mail, Hash, MessageCircle, CalendarDays, Contact, StickyNote, BookText,
-  Package, Upload, Link2, PhoneCall,
+  Package, Upload, Link2, PhoneCall, Music, Newspaper,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { SOURCE_CATALOG } from '../types/connectors';
@@ -300,6 +300,8 @@ const iconMap: Record<string, LucideIcon> = {
   notion: BookText,
   obsidian: FileText,
   apple_notes: StickyNote,
+  apple_music: Music,
+  hackernews: Newspaper,
   granola: FileText,
   gcalendar: CalendarDays,
   gcontacts: Contact,
@@ -311,6 +313,23 @@ const IconFor = ({ id, size = 18 }: { id: string; size?: number }) => {
   const Ico = iconMap[id] ?? Link2;
   return <Ico size={size} />;
 };
+
+const pendingSyncLabels: Record<string, string> = {
+  apple_music: 'Detected - sync to index tracks',
+  apple_notes: 'Detected - sync to index notes',
+  hackernews: 'Ready - sync to refresh stories',
+};
+
+const syncHints: Record<string, string> = {
+  apple_music: 'Requires Music.app to be open and Automation permission for OpenJarvis.',
+  apple_notes: 'Requires Full Disk Access for OpenJarvis, then restart the app.',
+  hackernews: 'Public tech stories; no account or personal data involved.',
+};
+
+function pendingSyncLabel(connectorId: string, hasSynced: boolean): string {
+  if (hasSynced) return 'Synced - 0 items found';
+  return pendingSyncLabels[connectorId] ?? 'Connected - not synced yet';
+}
 
 // ---------------------------------------------------------------------------
 // Data Sources section
@@ -348,11 +367,17 @@ function SyncStatusDisplay({
 
   // Error state
   if (sync?.error) {
+    const hint = syncHints[connectorId];
     return (
       <div>
         <div style={{ fontSize: 12, color: 'var(--color-error)', marginBottom: 4 }}>
           Error: {sync.error}
         </div>
+        {hint && (
+          <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)', marginBottom: 6 }}>
+            {hint}
+          </div>
+        )}
         <button
           onClick={handleSync}
           disabled={syncing}
@@ -455,13 +480,12 @@ function SyncStatusDisplay({
 
   // Connected but no chunks yet
   const hasSynced = sync?.last_sync != null;
+  const hint = syncHints[connectorId];
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <span style={{ fontSize: 12, color: 'var(--color-text-tertiary)' }}>
-          {hasSynced
-            ? 'Synced — 0 items found'
-            : 'Connected — not synced yet'}
+          {pendingSyncLabel(connectorId, hasSynced)}
         </span>
         <button
           onClick={handleSync}
@@ -475,6 +499,11 @@ function SyncStatusDisplay({
           }}
         >{syncing ? 'Syncing...' : hasSynced ? 'Re-sync' : 'Sync Now'}</button>
       </div>
+      {!hasSynced && hint && (
+        <div style={{ fontSize: 10, color: 'var(--color-text-tertiary)', marginTop: 4 }}>
+          {hint}
+        </div>
+      )}
       {hasSynced && connectorId === 'slack' && (
         <div style={{ fontSize: 10, color: 'var(--color-text-tertiary)', marginTop: 4 }}>
           Tip: invite the bot to channels with /invite @OpenJarvis, then re-sync
@@ -647,6 +676,8 @@ function DataSourcesSection() {
             const sync = syncStatuses[c.connector_id];
             const isReconnecting = expandedId === c.connector_id;
             const hasError = !!sync?.error;
+            const canConfigure = !!meta?.steps?.length;
+            const configureLabel = meta?.auth_type === 'local' ? 'Setup' : 'Reconnect';
             return (
               <div
                 key={c.connector_id}
@@ -665,6 +696,11 @@ function DataSourcesSection() {
                     <div className="font-semibold" style={{ fontSize: 14, fontWeight: 600, color: 'var(--color-text)' }}>
                       {c.display_name}
                     </div>
+                    {meta?.description && (
+                      <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)', marginTop: 2, marginBottom: 3 }}>
+                        {meta.description}
+                      </div>
+                    )}
                     <SyncStatusDisplay
                       chunks={c.chunks}
                       sync={sync}
@@ -673,25 +709,29 @@ function DataSourcesSection() {
                       onSyncTriggered={loadConnectors}
                     />
                   </div>
-                  <button
-                    onClick={() => setExpandedId(isReconnecting ? null : c.connector_id)}
-                    className="hud-label"
-                    style={{
-                      padding: '6px 12px',
-                      background: 'transparent',
-                      color: 'var(--color-text-secondary)',
-                      border: '1px solid var(--color-border)',
-                      borderRadius: 4, cursor: 'pointer',
-                      letterSpacing: '0.15em',
-                    }}
-                  >
-                    {isReconnecting ? 'Cancel' : 'Reconnect'}
-                  </button>
+                  {canConfigure && (
+                    <button
+                      onClick={() => setExpandedId(isReconnecting ? null : c.connector_id)}
+                      className="hud-label"
+                      style={{
+                        padding: '6px 12px',
+                        background: 'transparent',
+                        color: 'var(--color-text-secondary)',
+                        border: '1px solid var(--color-border)',
+                        borderRadius: 4, cursor: 'pointer',
+                        letterSpacing: '0.15em',
+                      }}
+                    >
+                      {isReconnecting ? 'Hide' : configureLabel}
+                    </button>
+                  )}
                 </div>
                 {isReconnecting && meta?.steps && (
                   <div style={{ borderTop: '1px solid var(--color-border)', padding: 12 }}>
                     <div style={{ fontSize: 12, color: 'var(--color-warning)', marginBottom: 8 }}>
-                      Re-enter credentials to reconnect this source.
+                      {meta.auth_type === 'local'
+                        ? 'Check these local setup requirements, then sync again.'
+                        : 'Re-enter credentials to reconnect this source.'}
                     </div>
                     {meta.steps.map((step, i) => (
                       <div

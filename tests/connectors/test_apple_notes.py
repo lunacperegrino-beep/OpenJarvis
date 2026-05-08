@@ -107,7 +107,31 @@ def test_not_connected_missing_db() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 3 — sync yields 2 notes with correct source and doc_type
+# Test 3 — sync reports permission/database access errors
+# ---------------------------------------------------------------------------
+
+
+def test_sync_reports_access_error(fake_db: Path, monkeypatch) -> None:
+    """sync() exposes a user-facing error when Notes cannot be read."""
+    from openjarvis.connectors.apple_notes import AppleNotesConnector  # noqa: PLC0415
+
+    def blocked_connect(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(sqlite3, "connect", blocked_connect)
+    conn = AppleNotesConnector(db_path=str(fake_db))
+
+    docs = list(conn.sync())
+    status = conn.sync_status()
+
+    assert docs == []
+    assert status.state == "error"
+    assert status.error is not None
+    assert "Full Disk Access" in status.error
+
+
+# ---------------------------------------------------------------------------
+# Test 4 — sync yields 2 notes with correct source and doc_type
 # ---------------------------------------------------------------------------
 
 

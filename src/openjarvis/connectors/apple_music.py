@@ -170,11 +170,17 @@ class AppleMusicConnector(BaseConnector):
         Document
             One document per track in the Music library.
         """
+        self._status.state = "syncing"
+        self._status.error = None
         raw = _run_osascript(_TRACKS_SCRIPT)
         if raw is None:
             logger.warning("Could not retrieve tracks from Music.app")
             self._status.state = "error"
-            self._status.error = "AppleScript query failed"
+            self._status.error = (
+                "Cannot read Apple Music. Open Music.app, then allow "
+                "OpenJarvis to control Music in System Settings > "
+                "Privacy & Security > Automation."
+            )
             return
 
         lines = [line for line in raw.split("\n") if line.strip()]

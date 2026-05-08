@@ -164,7 +164,10 @@ def test_sync_handles_failure(connector):
         docs = list(connector.sync())
 
     assert len(docs) == 0
-    assert connector.sync_status().state == "error"
+    status = connector.sync_status()
+    assert status.state == "error"
+    assert status.error is not None
+    assert "Automation" in status.error
 
 
 # ---------------------------------------------------------------------------
