@@ -120,11 +120,10 @@ def create_digest_router(*, db_path: str = "") -> APIRouter:
                 )
 
         try:
-            _save_digest_schedule(
-                enabled=body.enabled,
-                cron=cron,
-                timezone=timezone if body.timezone is not None else None,
-            )
+            save_kwargs = {"enabled": body.enabled, "cron": cron}
+            if body.timezone is not None:
+                save_kwargs["timezone"] = timezone
+            _save_digest_schedule(**save_kwargs)
             load_config.cache_clear()
         except Exception as exc:
             raise HTTPException(
@@ -138,12 +137,11 @@ def create_digest_router(*, db_path: str = "") -> APIRouter:
         else:
             _cancel_scheduler_tasks()
 
-        updated_cfg = load_config()
         return {
-            "enabled": updated_cfg.digest.enabled,
-            "cron": updated_cfg.digest.schedule,
-            "timezone": updated_cfg.digest.timezone,
-            "sections": updated_cfg.digest.sections,
+            "enabled": body.enabled,
+            "cron": cron,
+            "timezone": timezone,
+            "sections": cfg.digest.sections,
         }
 
     return router

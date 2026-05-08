@@ -2178,10 +2178,11 @@ def create_agent_manager_router(
             "ready": sb is not None and has_bridge,
         }
 
+    global_router.include_router(sendblue_router)
+
     return (
         agents_router,
         templates_router,
         global_router,
         tools_router,
-        sendblue_router,
     )
