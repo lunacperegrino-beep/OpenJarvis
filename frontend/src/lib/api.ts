@@ -318,6 +318,87 @@ export interface DigestGenerateResult {
   artifact?: DigestArtifact | null;
 }
 
+export interface SkillStepInfo {
+  tool_name: string;
+  skill_name: string;
+  arguments_template: string;
+  output_key: string;
+}
+
+export interface SkillInfo {
+  name: string;
+  version: string;
+  description: string;
+  author: string;
+  source: string;
+  root: string;
+  tags: string[];
+  required_capabilities: string[];
+  depends: string[];
+  missing_dependencies: string[];
+  input_keys: string[];
+  tool_names: string[];
+  missing_runtime_tools: string[];
+  run_ready: boolean;
+  user_invocable: boolean;
+  disable_model_invocation: boolean;
+  markdown_content: string;
+  steps: SkillStepInfo[];
+}
+
+export interface SkillCatalog {
+  skills: SkillInfo[];
+  roots: Array<{ source: string; path: string; exists: boolean }>;
+  execution: {
+    available_tools: string[];
+    blocked_tools?: string[];
+  };
+}
+
+export interface SkillRunResult {
+  skill_name: string;
+  success: boolean;
+  context: Record<string, unknown>;
+  step_results: Array<{
+    tool_name: string;
+    content: string;
+    success: boolean;
+    usage: Record<string, unknown>;
+    cost_usd: number;
+    latency_seconds: number;
+    metadata: Record<string, unknown>;
+  }>;
+}
+
+export interface WorkflowNodeInfo {
+  id: string;
+  type: string;
+  agent: string;
+  tools: string[];
+  config: Record<string, unknown>;
+  condition_expr: string;
+  max_iterations: number;
+  transform_expr: string;
+}
+
+export interface WorkflowInfo {
+  name: string;
+  source: string;
+  root: string;
+  nodes: WorkflowNodeInfo[];
+  edges: Array<{ source: string; target: string; condition: string }>;
+  execution_stages: string[][];
+}
+
+export interface WorkflowCatalog {
+  workflows: WorkflowInfo[];
+  roots: Array<{ source: string; path: string; exists: boolean }>;
+  execution: {
+    status: string;
+    detail?: string;
+  };
+}
+
 export async function fetchRuntimeReadiness(selectedModel: string): Promise<RuntimeReadiness> {
   if (isTauri()) {
     return tauriInvoke<RuntimeReadiness>('check_runtime_readiness', { selectedModel });
@@ -409,6 +490,41 @@ export async function fetchRuntimeReadiness(selectedModel: string): Promise<Runt
   });
 
   return { checked_at: checkedAt, api_base: base, items };
+}
+
+export async function fetchSkills(): Promise<SkillCatalog> {
+  const res = await fetch(`${getBase()}/v1/skills`);
+  if (!res.ok) throw new Error(`Failed to fetch skills: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchSkill(skillName: string): Promise<SkillInfo> {
+  const res = await fetch(`${getBase()}/v1/skills/${encodeURIComponent(skillName)}`);
+  if (!res.ok) throw new Error(`Failed to fetch skill: ${res.status}`);
+  return res.json();
+}
+
+export async function runSkill(
+  skillName: string,
+  context: Record<string, unknown>,
+): Promise<SkillRunResult> {
+  const res = await fetch(`${getBase()}/v1/skills/${encodeURIComponent(skillName)}/run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ context }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ detail: res.statusText }));
+    const detail = typeof body.detail === 'string' ? body.detail : body.detail?.message;
+    throw new Error(detail || `Failed to run skill: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function fetchWorkflows(): Promise<WorkflowCatalog> {
+  const res = await fetch(`${getBase()}/v1/workflows`);
+  if (!res.ok) throw new Error(`Failed to fetch workflows: ${res.status}`);
+  return res.json();
 }
 
 export async function fetchDoctorReport(): Promise<DoctorReport> {

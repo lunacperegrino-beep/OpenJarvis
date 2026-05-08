@@ -22,6 +22,7 @@ import {
   History,
   Wifi,
   CalendarDays,
+  Wrench,
 } from 'lucide-react';
 import { ConversationList } from './ConversationList';
 import { useAppStore } from '../../lib/store';
@@ -64,6 +65,7 @@ export function Sidebar() {
     { path: '/tasks', icon: History, label: 'Tasks' },
     { path: '/channels', icon: Wifi, label: 'Channels' },
     { path: '/digest', icon: CalendarDays, label: 'Daily Brief' },
+    { path: '/skills', icon: Wrench, label: 'Skills' },
     { path: '/artifacts', icon: Archive, label: 'Artifacts' },
     { path: '/diagnostics', icon: Stethoscope, label: 'Diagnostics' },
     { path: '/logs', icon: ScrollText, label: 'Logs' },

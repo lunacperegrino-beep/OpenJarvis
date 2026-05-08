@@ -78,7 +78,46 @@ class TestSkillRoutes:
         client = TestClient(_make_app())
         resp = client.get("/v1/skills")
         assert resp.status_code == 200
-        assert "skills" in resp.json()
+        data = resp.json()
+        assert "skills" in data
+        assert "roots" in data
+        assert any(skill["name"] == "daily-digest" for skill in data["skills"])
+
+    def test_get_builtin_skill_detail(self):
+        client = TestClient(_make_app())
+        resp = client.get("/v1/skills/daily-digest")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["name"] == "daily-digest"
+        assert "steps" in data
+
+    def test_run_safe_builtin_skill(self):
+        client = TestClient(_make_app())
+        resp = client.post(
+            "/v1/skills/email-draft/run",
+            json={
+                "context": {
+                    "context": "A colleague asked to move a meeting.",
+                    "intent": "Accept politely",
+                    "recipient": "Sam",
+                }
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["skill_name"] == "email-draft"
+        assert data["success"] is True
+
+
+class TestWorkflowRoutes:
+    def test_list_workflows(self):
+        client = TestClient(_make_app())
+        resp = client.get("/v1/workflows")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "workflows" in data
+        assert "roots" in data
+        assert data["execution"]["status"] in {"catalog_only", "error"}
 
 
 class TestSessionRoutes:

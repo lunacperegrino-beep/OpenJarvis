@@ -5,6 +5,8 @@ from __future__ import annotations
 import inspect
 import json
 import logging
+import re
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -56,6 +58,10 @@ class OptimizeRunRequest(BaseModel):
     max_trials: int = 20
     optimizer_model: str = "claude-sonnet-4-6"
     max_samples: int = 50
+
+
+class SkillRunRequest(BaseModel):
+    context: Optional[Dict[str, Any]] = None
 
 
 # ---- Agent routes ----
@@ -407,21 +413,331 @@ async def telemetry_energy(request: Request):
 # ---- Skills routes ----
 
 skills_router = APIRouter(prefix="/v1/skills", tags=["skills"])
+workflows_router = APIRouter(prefix="/v1/workflows", tags=["workflows"])
+
+_SKILL_TEMPLATE_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+_DESKTOP_SAFE_SKILL_TOOLS = {
+    "calculator",
+    "file_read",
+    "http_request",
+    "llm",
+    "memory_retrieve",
+    "memory_search",
+    "pdf_extract",
+    "think",
+    "web_search",
+}
+_DESKTOP_SKILL_TOOL_MODULES = {
+    "calculator": "openjarvis.tools.calculator",
+    "file_read": "openjarvis.tools.file_read",
+    "http_request": "openjarvis.tools.http_request",
+    "llm": "openjarvis.tools.llm_tool",
+    "memory_retrieve": "openjarvis.tools.storage_tools",
+    "memory_search": "openjarvis.tools.storage_tools",
+    "pdf_extract": "openjarvis.tools.pdf_tool",
+    "think": "openjarvis.tools.think",
+    "web_search": "openjarvis.tools.web_search",
+}
+
+
+def _configured_skill_dir(request: Request) -> Path:
+    config = getattr(request.app.state, "config", None)
+    skills_config = getattr(config, "skills", None)
+    raw_dir = getattr(skills_config, "skills_dir", "~/.openjarvis/skills/")
+    return Path(raw_dir).expanduser()
+
+
+def _skill_search_roots(request: Request) -> list[tuple[str, Path]]:
+    builtin = Path(__file__).resolve().parents[1] / "skills" / "data"
+    roots = [
+        ("workspace", Path("./skills")),
+        ("user", _configured_skill_dir(request)),
+        ("built-in", builtin),
+    ]
+    deduped: list[tuple[str, Path]] = []
+    seen: set[str] = set()
+    for label, root in roots:
+        key = (
+            str(root.expanduser().resolve())
+            if root.exists()
+            else str(root.expanduser())
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((label, root.expanduser()))
+    return deduped
+
+
+def _discover_skill_records(request: Request) -> list[tuple[Any, str, Path]]:
+    from openjarvis.skills.loader import discover_skills
+
+    records: list[tuple[Any, str, Path]] = []
+    seen: set[str] = set()
+    for source, root in _skill_search_roots(request):
+        for manifest in discover_skills(root):
+            if manifest.name in seen:
+                continue
+            seen.add(manifest.name)
+            records.append((manifest, source, root))
+    return records
+
+
+def _skill_tool_names(manifest: Any) -> list[str]:
+    names: list[str] = []
+    for step in getattr(manifest, "steps", []) or []:
+        tool_name = getattr(step, "tool_name", "")
+        if tool_name:
+            names.append(tool_name)
+    return sorted(set(names))
+
+
+def _skill_input_keys(manifest: Any) -> list[str]:
+    output_keys = {
+        getattr(step, "output_key", "")
+        for step in getattr(manifest, "steps", []) or []
+        if getattr(step, "output_key", "")
+    }
+    keys: set[str] = set()
+    for step in getattr(manifest, "steps", []) or []:
+        template = getattr(step, "arguments_template", "") or ""
+        keys.update(_SKILL_TEMPLATE_RE.findall(template))
+    return sorted(k for k in keys if k not in output_keys)
+
+
+def _workflow_roots() -> list[tuple[str, Path]]:
+    return [
+        ("workspace", Path("./workflows")),
+        ("user", Path("~/.openjarvis/workflows/").expanduser()),
+    ]
+
+
+def _serialize_skill(
+    manifest: Any,
+    source: str,
+    root: Path,
+    *,
+    available_names: set[str],
+    executable_tools: set[str],
+) -> dict[str, Any]:
+    tool_names = _skill_tool_names(manifest)
+    missing_dependencies = [
+        dep
+        for dep in getattr(manifest, "depends", []) or []
+        if dep not in available_names
+    ]
+    missing_runtime_tools = [
+        name for name in tool_names if name not in executable_tools
+    ]
+    return {
+        "name": manifest.name,
+        "version": getattr(manifest, "version", ""),
+        "description": getattr(manifest, "description", ""),
+        "author": getattr(manifest, "author", ""),
+        "source": source,
+        "root": str(root),
+        "tags": list(getattr(manifest, "tags", []) or []),
+        "required_capabilities": list(
+            getattr(manifest, "required_capabilities", []) or []
+        ),
+        "depends": list(getattr(manifest, "depends", []) or []),
+        "missing_dependencies": missing_dependencies,
+        "input_keys": _skill_input_keys(manifest),
+        "tool_names": tool_names,
+        "missing_runtime_tools": missing_runtime_tools,
+        "run_ready": not missing_dependencies and not missing_runtime_tools,
+        "user_invocable": bool(getattr(manifest, "user_invocable", True)),
+        "disable_model_invocation": bool(
+            getattr(manifest, "disable_model_invocation", False)
+        ),
+        "markdown_content": getattr(manifest, "markdown_content", ""),
+        "steps": [
+            {
+                "tool_name": getattr(step, "tool_name", ""),
+                "skill_name": getattr(step, "skill_name", ""),
+                "arguments_template": getattr(step, "arguments_template", "{}"),
+                "output_key": getattr(step, "output_key", ""),
+            }
+            for step in getattr(manifest, "steps", []) or []
+        ],
+    }
+
+
+def _build_skill_tool_executor(request: Request):
+    cached = getattr(request.app.state, "_desktop_skill_tool_executor", None)
+    if cached is not None:
+        return cached
+
+    import importlib
+
+    import openjarvis.tools  # noqa: F401
+    from openjarvis.core.registry import ToolRegistry
+    from openjarvis.tools._stubs import BaseTool, ToolExecutor
+
+    for name, module_name in _DESKTOP_SKILL_TOOL_MODULES.items():
+        if ToolRegistry.contains(name):
+            continue
+        module = importlib.import_module(module_name)
+        if not ToolRegistry.contains(name):
+            try:
+                importlib.reload(module)
+            except ValueError:
+                pass
+
+    tools = []
+    memory_backend = getattr(request.app.state, "memory_backend", None)
+    engine = getattr(request.app.state, "engine", None)
+    model = getattr(request.app.state, "model", "")
+    bus = getattr(request.app.state, "bus", None)
+
+    for name in sorted(_DESKTOP_SAFE_SKILL_TOOLS):
+        if not ToolRegistry.contains(name):
+            continue
+        tool_cls = ToolRegistry.get(name)
+        try:
+            if name in {"memory_retrieve", "memory_search"}:
+                tool = tool_cls(memory_backend)
+            elif name == "llm":
+                tool = tool_cls(engine, model=model)
+            elif isinstance(tool_cls, type) and issubclass(tool_cls, BaseTool):
+                tool = tool_cls()
+            elif isinstance(tool_cls, BaseTool):
+                tool = tool_cls
+            else:
+                continue
+        except Exception:
+            continue
+        tools.append(tool)
+
+    executor = ToolExecutor(tools, bus)
+    request.app.state._desktop_skill_tool_executor = executor
+    request.app.state._desktop_skill_tool_names = sorted(
+        {tool.spec.name for tool in tools}
+    )
+    return executor
+
+
+def _desktop_executable_tool_names(request: Request) -> set[str]:
+    _build_skill_tool_executor(request)
+    return set(getattr(request.app.state, "_desktop_skill_tool_names", []) or [])
+
+
+def _get_skill_record(request: Request, skill_name: str) -> tuple[Any, str, Path]:
+    for manifest, source, root in _discover_skill_records(request):
+        if manifest.name == skill_name:
+            return manifest, source, root
+    raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found")
 
 
 @skills_router.get("")
 async def list_skills(request: Request):
-    """List installed skills."""
+    """List installed and built-in skills with desktop-ready metadata."""
     try:
-        from openjarvis.core.registry import SkillRegistry
-
-        skills = []
-        for key in sorted(SkillRegistry.keys()):
-            skills.append({"name": key})
-        return {"skills": skills}
+        records = _discover_skill_records(request)
+        available_names = {manifest.name for manifest, _, _ in records}
+        executable_tools = _desktop_executable_tool_names(request)
+        skills = [
+            _serialize_skill(
+                manifest,
+                source,
+                root,
+                available_names=available_names,
+                executable_tools=executable_tools,
+            )
+            for manifest, source, root in records
+        ]
+        return {
+            "skills": sorted(skills, key=lambda item: item["name"]),
+            "roots": [
+                {
+                    "source": source,
+                    "path": str(root),
+                    "exists": root.exists(),
+                }
+                for source, root in _skill_search_roots(request)
+            ],
+            "execution": {
+                "available_tools": sorted(executable_tools),
+                "blocked_tools": sorted(
+                    {
+                        name
+                        for manifest, _, _ in records
+                        for name in _skill_tool_names(manifest)
+                        if name not in executable_tools
+                    }
+                ),
+            },
+        }
     except Exception as exc:
         logger.warning("Failed to list skills: %s", exc)
-        return {"skills": []}
+        return {"skills": [], "roots": [], "execution": {"available_tools": []}}
+
+
+@skills_router.get("/{skill_name}")
+async def get_skill(skill_name: str, request: Request):
+    """Return details for a single skill."""
+    manifest, source, root = _get_skill_record(request, skill_name)
+    records = _discover_skill_records(request)
+    return _serialize_skill(
+        manifest,
+        source,
+        root,
+        available_names={record[0].name for record in records},
+        executable_tools=_desktop_executable_tool_names(request),
+    )
+
+
+@skills_router.post("/{skill_name}/run")
+async def run_skill(skill_name: str, req: SkillRunRequest, request: Request):
+    """Run a user-invocable skill when all required runtime tools are safe."""
+    manifest, _, _ = _get_skill_record(request, skill_name)
+    if not getattr(manifest, "user_invocable", True):
+        raise HTTPException(status_code=409, detail="Skill is not user-invocable")
+
+    executable_tools = _desktop_executable_tool_names(request)
+    missing_runtime_tools = [
+        name for name in _skill_tool_names(manifest) if name not in executable_tools
+    ]
+    if missing_runtime_tools:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": (
+                    "Skill needs tools that are not enabled for"
+                    " desktop execution"
+                ),
+                "missing_runtime_tools": missing_runtime_tools,
+            },
+        )
+
+    def _run() -> dict[str, Any]:
+        from openjarvis.core.events import EventBus
+        from openjarvis.skills.manager import SkillManager
+
+        bus = getattr(request.app.state, "bus", None) or EventBus()
+        manager = SkillManager(bus=bus)
+        manager.discover(paths=[root for _, root in _skill_search_roots(request)])
+        manager.set_tool_executor(_build_skill_tool_executor(request))
+        result = manager.execute(skill_name, req.context or {})
+        return {
+            "skill_name": result.skill_name,
+            "success": result.success,
+            "context": result.context,
+            "step_results": [
+                {
+                    "tool_name": step.tool_name,
+                    "content": step.content,
+                    "success": step.success,
+                    "usage": step.usage,
+                    "cost_usd": step.cost_usd,
+                    "latency_seconds": step.latency_seconds,
+                    "metadata": step.metadata,
+                }
+                for step in result.step_results
+            ],
+        }
+
+    return await run_in_threadpool(_run)
 
 
 @skills_router.post("")
@@ -440,6 +756,68 @@ async def remove_skill(skill_name: str, request: Request):
         "status": "not_implemented",
         "message": "Skill removal not yet supported via API",
     }
+
+
+@workflows_router.get("")
+async def list_workflows(request: Request):
+    """List workflow graph definitions available to the desktop app."""
+    try:
+        from openjarvis.workflow.loader import discover_workflows
+
+        roots = _workflow_roots()
+        workflows = []
+        seen: set[str] = set()
+        for source, root in roots:
+            for name, graph in discover_workflows([root]).items():
+                if name in seen:
+                    continue
+                seen.add(name)
+                workflows.append(
+                    {
+                        "name": name,
+                        "source": source,
+                        "root": str(root),
+                        "nodes": [
+                            {
+                                "id": node.id,
+                                "type": node.node_type.value,
+                                "agent": node.agent,
+                                "tools": node.tools,
+                                "config": node.config,
+                                "condition_expr": node.condition_expr,
+                                "max_iterations": node.max_iterations,
+                                "transform_expr": node.transform_expr,
+                            }
+                            for node in graph.nodes
+                        ],
+                        "edges": [
+                            {
+                                "source": edge.source,
+                                "target": edge.target,
+                                "condition": edge.condition,
+                            }
+                            for edge in graph.edges
+                        ],
+                        "execution_stages": graph.execution_stages(),
+                    }
+                )
+        return {
+            "workflows": sorted(workflows, key=lambda item: item["name"]),
+            "roots": [
+                {"source": source, "path": str(root), "exists": root.exists()}
+                for source, root in roots
+            ],
+            "execution": {
+                "status": "catalog_only",
+                "detail": (
+                    "CLI workflow execution is currently a system-level"
+                    " operation."
+                ),
+            },
+        }
+    except Exception as exc:
+        logger.warning("Failed to list workflows: %s", exc)
+        return {"workflows": [], "roots": [], "execution": {"status": "error"}}
 
 
 # ---- Sessions routes ----
@@ -936,6 +1314,7 @@ def include_all_routes(app) -> None:
     app.include_router(traces_router)
     app.include_router(telemetry_router)
     app.include_router(skills_router)
+    app.include_router(workflows_router)
     app.include_router(sessions_router)
     app.include_router(budget_router)
     app.include_router(metrics_router)
@@ -983,6 +1362,7 @@ __all__ = [
     "traces_router",
     "telemetry_router",
     "skills_router",
+    "workflows_router",
     "sessions_router",
     "budget_router",
     "metrics_router",

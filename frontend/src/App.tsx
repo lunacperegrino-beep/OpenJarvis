@@ -13,6 +13,7 @@ import { DiagnosticsPage } from './pages/DiagnosticsPage';
 import { BackgroundTasksPage } from './pages/BackgroundTasksPage';
 import { ChannelsPage } from './pages/ChannelsPage';
 import { DailyDigestPage } from './pages/DailyDigestPage';
+import { SkillsWorkflowsPage } from './pages/SkillsWorkflowsPage';
 import { CommandPalette } from './components/CommandPalette';
 import { SetupScreen } from './components/SetupScreen';
 import { Toaster } from './components/ui/sonner';
@@ -202,6 +203,7 @@ export default function App() {
           <Route path="tasks" element={<BackgroundTasksPage />} />
           <Route path="channels" element={<ChannelsPage />} />
           <Route path="digest" element={<DailyDigestPage />} />
+          <Route path="skills" element={<SkillsWorkflowsPage />} />
           <Route path="artifacts" element={<ArtifactsPage />} />
           <Route path="diagnostics" element={<DiagnosticsPage />} />
           <Route path="logs" element={<LogsPage />} />

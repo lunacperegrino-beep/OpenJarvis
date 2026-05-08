@@ -81,4 +81,31 @@ def _parse_node(data: Dict[str, Any]) -> WorkflowNode:
     )
 
 
-__all__ = ["load_workflow"]
+def discover_workflows(
+    paths: list[str | Path] | None = None,
+) -> dict[str, WorkflowGraph]:
+    """Discover workflow TOML files from standard user/workspace locations.
+
+    First-seen workflow names win so workspace definitions can override user
+    definitions when both are present.
+    """
+    if paths is None:
+        paths = [Path("./workflows"), Path("~/.openjarvis/workflows/").expanduser()]
+
+    workflows: dict[str, WorkflowGraph] = {}
+    for raw_path in paths:
+        root = Path(raw_path).expanduser()
+        if not root.exists():
+            continue
+        candidates = [root] if root.is_file() else sorted(root.rglob("*.toml"))
+        for candidate in candidates:
+            try:
+                graph = load_workflow(candidate)
+            except Exception:
+                continue
+            if graph.name not in workflows:
+                workflows[graph.name] = graph
+    return workflows
+
+
+__all__ = ["load_workflow", "discover_workflows"]

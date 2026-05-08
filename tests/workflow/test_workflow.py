@@ -8,6 +8,7 @@ from openjarvis.core.events import EventBus, EventType
 from openjarvis.workflow.builder import WorkflowBuilder
 from openjarvis.workflow.engine import WorkflowEngine
 from openjarvis.workflow.graph import WorkflowGraph
+from openjarvis.workflow.loader import discover_workflows, load_workflow
 from openjarvis.workflow.types import NodeType, WorkflowEdge, WorkflowNode
 
 
@@ -150,3 +151,41 @@ class TestWorkflowEngine:
         event_types = {e.event_type for e in bus.history}
         assert EventType.WORKFLOW_START in event_types
         assert EventType.WORKFLOW_END in event_types
+
+
+class TestWorkflowLoader:
+    def test_load_workflow_from_toml(self, tmp_path):
+        path = tmp_path / "sample.toml"
+        path.write_text(
+            """
+[workflow]
+name = "sample"
+
+[[workflow.nodes]]
+id = "extract"
+type = "transform"
+transform = "concatenate"
+"""
+        )
+
+        graph = load_workflow(path)
+
+        assert graph.name == "sample"
+        assert len(graph.nodes) == 1
+
+    def test_discover_workflows_from_paths(self, tmp_path):
+        (tmp_path / "sample.toml").write_text(
+            """
+[workflow]
+name = "sample"
+
+[[workflow.nodes]]
+id = "extract"
+type = "transform"
+transform = "concatenate"
+"""
+        )
+
+        workflows = discover_workflows([tmp_path])
+
+        assert "sample" in workflows
