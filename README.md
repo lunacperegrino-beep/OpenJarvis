@@ -248,8 +248,13 @@ git clone https://github.com/open-jarvis/OpenJarvis.git
 cd OpenJarvis
 uv sync --extra dev
 uv run pre-commit install
-uv run pytest tests/ -v
+./scripts/test.sh tests/ -v
 ```
+
+For desktop development, prefer `./scripts/test.sh ...` over manually
+installing pytest into `.venv`. The desktop app syncs a runtime-only
+environment, while this wrapper asks `uv` for the `dev` extra only when tests
+are run.
 
 Browse the [Roadmap](https://open-jarvis.github.io/OpenJarvis/development/roadmap/) for areas where help is needed. Comment **"take"** on any issue to get auto-assigned.
 
