@@ -22,6 +22,68 @@ from openjarvis.intelligence import (
 
 logger = logging.getLogger(__name__)
 
+_MEMORY_TOOL_NAMES = {
+    "retrieval",
+    "memory_store",
+    "memory_search",
+    "memory_index",
+    "memory_retrieve",
+}
+_KNOWLEDGE_TOOL_NAMES = {"knowledge_search", "knowledge_sql"}
+
+
+def _build_memory_backend(config, console: Console | None = None):
+    """Instantiate the configured memory backend for server tools/context."""
+    if not config.agent.context_from_memory:
+        return None
+
+    try:
+        import openjarvis.tools.storage  # noqa: F401
+        from openjarvis.core.registry import MemoryRegistry
+
+        mem_key = config.memory.default_backend
+        if not MemoryRegistry.contains(mem_key):
+            return None
+
+        memory_backend = MemoryRegistry.create(
+            mem_key,
+            db_path=config.memory.db_path,
+        )
+        if console is not None:
+            console.print("  Memory:    [cyan]active[/cyan]")
+        return memory_backend
+    except Exception as exc:
+        logger.debug("Memory backend init failed: %s", exc)
+        return None
+
+
+def _build_knowledge_store():
+    """Open the connector knowledge store used by desktop data sources."""
+    try:
+        from openjarvis.connectors.store import KnowledgeStore
+
+        return KnowledgeStore()
+    except Exception as exc:
+        logger.debug("Knowledge store init failed: %s", exc)
+        return None
+
+
+def _inject_desktop_tool_deps(
+    tool,
+    *,
+    memory_backend=None,
+    knowledge_store=None,
+    channel_backend=None,
+) -> None:
+    """Inject desktop server dependencies into registry-created tools."""
+    name = tool.spec.name
+    if name in _MEMORY_TOOL_NAMES and hasattr(tool, "_backend"):
+        tool._backend = memory_backend or knowledge_store
+    elif name in _KNOWLEDGE_TOOL_NAMES and hasattr(tool, "_store"):
+        tool._store = knowledge_store
+    elif name.startswith("channel_") and hasattr(tool, "_channel"):
+        tool._channel = channel_backend
+
 
 @click.command()
 @click.option("--host", default=None, help="Bind address (default: config).")
@@ -170,6 +232,10 @@ def serve(
             console.print("[red]No model available on engine.[/red]")
             sys.exit(1)
 
+    # Set up local stores before agent creation so configured tools are grounded.
+    memory_backend = _build_memory_backend(config, console)
+    knowledge_store = _build_knowledge_store()
+
     # Resolve agent
     agent = None
     agent_key = agent_name or config.server.agent
@@ -212,6 +278,7 @@ def serve(
                             }
                     else:
                         allowed = _DEFAULT_TOOLS
+                    allowed.update(_KNOWLEDGE_TOOL_NAMES)
 
                     tools = []
                     for name in ToolRegistry.keys():
@@ -221,8 +288,19 @@ def serve(
                         if isinstance(tool_cls, type) and issubclass(
                             tool_cls, BaseTool
                         ):
-                            tools.append(tool_cls())
+                            tool = tool_cls()
+                            _inject_desktop_tool_deps(
+                                tool,
+                                memory_backend=memory_backend,
+                                knowledge_store=knowledge_store,
+                            )
+                            tools.append(tool)
                         elif isinstance(tool_cls, BaseTool):
+                            _inject_desktop_tool_deps(
+                                tool_cls,
+                                memory_backend=memory_backend,
+                                knowledge_store=knowledge_store,
+                            )
                             tools.append(tool_cls)
                     # Load external MCP tools (mirrors Bug 2 fix in ask.py)
                     if mcp_configured:
@@ -297,7 +375,7 @@ def serve(
                 if AgentRegistry.contains(channel_agent):
                     _ch_cls = AgentRegistry.get(channel_agent)
                     if getattr(_ch_cls, "accepts_tools", False):
-                        import openjarvis.tools
+                        import openjarvis.tools  # noqa: F401
                         from openjarvis.core.registry import ToolRegistry
                         from openjarvis.tools._stubs import BaseTool
 
@@ -318,14 +396,28 @@ def serve(
                                 }
                         else:
                             _allowed = _DEFAULT_TOOLS
+                        _allowed.update(_KNOWLEDGE_TOOL_NAMES)
 
                         for _tname in ToolRegistry.keys():
                             if _tname not in _allowed:
                                 continue
                             _tcls = ToolRegistry.get(_tname)
                             if isinstance(_tcls, type) and issubclass(_tcls, BaseTool):
-                                _channel_tools.append(_tcls())
+                                _tool = _tcls()
+                                _inject_desktop_tool_deps(
+                                    _tool,
+                                    memory_backend=memory_backend,
+                                    knowledge_store=knowledge_store,
+                                    channel_backend=channel_bridge,
+                                )
+                                _channel_tools.append(_tool)
                             elif isinstance(_tcls, BaseTool):
+                                _inject_desktop_tool_deps(
+                                    _tcls,
+                                    memory_backend=memory_backend,
+                                    knowledge_store=knowledge_store,
+                                    channel_backend=channel_bridge,
+                                )
                                 _channel_tools.append(_tcls)
             except Exception as exc:
                 logger.warning("Channel tools failed to load: %s", exc)
@@ -413,23 +505,6 @@ def serve(
         except Exception as exc:
             logger.debug("Agent scheduler init failed: %s", exc)
 
-    # Set up memory backend for context injection
-    memory_backend = None
-    if config.agent.context_from_memory:
-        try:
-            import openjarvis.tools.storage  # noqa: F401
-            from openjarvis.core.registry import MemoryRegistry
-
-            mem_key = config.memory.default_backend
-            if MemoryRegistry.contains(mem_key):
-                memory_backend = MemoryRegistry.create(
-                    mem_key,
-                    db_path=config.memory.db_path,
-                )
-                console.print("  Memory:    [cyan]active[/cyan]")
-        except Exception as exc:
-            logger.debug("Memory backend init failed: %s", exc)
-
     # --- Channel Gateway: API key, sessions, ChannelBridge ---
     import os as _os
 
@@ -503,6 +578,7 @@ def serve(
         channel_bridge=channel_bridge,
         config=config,
         memory_backend=memory_backend,
+        knowledge_store=knowledge_store,
         speech_backend=speech_backend,
         agent_manager=agent_manager,
         agent_scheduler=agent_scheduler,

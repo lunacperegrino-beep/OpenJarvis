@@ -16,6 +16,7 @@ from openjarvis.server.models import (
     ChatCompletionChunk,
     ChatCompletionRequest,
     ChatCompletionResponse,
+    ChatMessage,
     Choice,
     ChoiceMessage,
     ComplexityInfo,
@@ -43,6 +44,31 @@ def _to_messages(chat_messages) -> list[Message]:
             )
         )
     return messages
+
+
+def _latest_user_message(chat_messages) -> str:
+    for m in reversed(chat_messages):
+        if m.role == "user" and m.content:
+            return m.content
+    return ""
+
+
+def _inject_system_context(
+    request_body: ChatCompletionRequest,
+    context_text: str,
+) -> None:
+    if not context_text.strip():
+        return
+
+    if request_body.messages and request_body.messages[0].role == "system":
+        first = request_body.messages[0]
+        first.content = f"{first.content}\n\n{context_text}".strip()
+        return
+
+    request_body.messages = [
+        ChatMessage(role="system", content=context_text),
+        *request_body.messages,
+    ]
 
 
 @router.post("/v1/chat/completions")
@@ -103,6 +129,22 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
         except Exception:
             logging.getLogger("openjarvis.server").debug(
                 "Memory context injection failed",
+                exc_info=True,
+            )
+
+    if not request_body.no_memory and request_body.messages:
+        try:
+            from openjarvis.server.personal_context import (
+                build_personal_data_context,
+            )
+
+            query_text = _latest_user_message(request_body.messages)
+            knowledge_store = getattr(request.app.state, "knowledge_store", None)
+            context_text = build_personal_data_context(query_text, knowledge_store)
+            _inject_system_context(request_body, context_text)
+        except Exception:
+            logging.getLogger("openjarvis.server").debug(
+                "Personal data context injection failed",
                 exc_info=True,
             )
 
@@ -866,13 +908,17 @@ def _binding_preview(binding: dict[str, Any]) -> dict[str, Any]:
         key
         for key, value in config.items()
         if _truthy(value)
-        and not any(token in key.lower() for token in ("token", "secret", "password", "key"))
+        and not any(
+            token in key.lower() for token in ("token", "secret", "password", "key")
+        )
     ]
     secret_keys = [
         key
         for key, value in config.items()
         if _truthy(value)
-        and any(token in key.lower() for token in ("token", "secret", "password", "key"))
+        and any(
+            token in key.lower() for token in ("token", "secret", "password", "key")
+        )
     ]
     return {
         "visible_keys": visible_keys,
@@ -881,7 +927,9 @@ def _binding_preview(binding: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _configured_fields_for_config(channel_config: Any, key: str) -> tuple[list[str], list[str]]:
+def _configured_fields_for_config(
+    channel_config: Any, key: str
+) -> tuple[list[str], list[str]]:
     required = _CHANNEL_REQUIRED_FIELDS.get(key, [])
     sub_config = getattr(channel_config, key, None)
     present: list[str] = []
@@ -895,7 +943,9 @@ def _configured_fields_for_config(channel_config: Any, key: str) -> tuple[list[s
     return present, missing
 
 
-def _sendblue_config_fields(bindings: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
+def _sendblue_config_fields(
+    bindings: list[dict[str, Any]],
+) -> tuple[list[str], list[str]]:
     present: set[str] = set()
     for env_key, field in (
         ("SENDBLUE_API_KEY_ID", "api_key_id"),
@@ -911,7 +961,9 @@ def _sendblue_config_fields(bindings: list[dict[str, Any]]) -> tuple[list[str], 
         for field in _CHANNEL_REQUIRED_FIELDS["sendblue"]:
             if _truthy(config.get(field)):
                 present.add(field)
-    missing = [field for field in _CHANNEL_REQUIRED_FIELDS["sendblue"] if field not in present]
+    missing = [
+        field for field in _CHANNEL_REQUIRED_FIELDS["sendblue"] if field not in present
+    ]
     return sorted(present), missing
 
 
