@@ -418,23 +418,33 @@ workflows_router = APIRouter(prefix="/v1/workflows", tags=["workflows"])
 _SKILL_TEMPLATE_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _DESKTOP_SAFE_SKILL_TOOLS = {
     "calculator",
+    "code_interpreter",
     "file_read",
     "http_request",
+    "llm_call",
     "llm",
+    "memory_index",
     "memory_retrieve",
     "memory_search",
+    "memory_store",
     "pdf_extract",
+    "shell_exec",
     "think",
     "web_search",
 }
 _DESKTOP_SKILL_TOOL_MODULES = {
     "calculator": "openjarvis.tools.calculator",
+    "code_interpreter": "openjarvis.tools.code_interpreter",
     "file_read": "openjarvis.tools.file_read",
     "http_request": "openjarvis.tools.http_request",
+    "llm_call": "openjarvis.tools.llm_tool",
     "llm": "openjarvis.tools.llm_tool",
+    "memory_index": "openjarvis.tools.storage_tools",
     "memory_retrieve": "openjarvis.tools.storage_tools",
     "memory_search": "openjarvis.tools.storage_tools",
+    "memory_store": "openjarvis.tools.storage_tools",
     "pdf_extract": "openjarvis.tools.pdf_tool",
+    "shell_exec": "openjarvis.tools.shell_exec",
     "think": "openjarvis.tools.think",
     "web_search": "openjarvis.tools.web_search",
 }
@@ -586,6 +596,7 @@ def _build_skill_tool_executor(request: Request):
 
     tools = []
     memory_backend = getattr(request.app.state, "memory_backend", None)
+    knowledge_store = getattr(request.app.state, "knowledge_store", None)
     engine = getattr(request.app.state, "engine", None)
     model = getattr(request.app.state, "model", "")
     bus = getattr(request.app.state, "bus", None)
@@ -595,9 +606,14 @@ def _build_skill_tool_executor(request: Request):
             continue
         tool_cls = ToolRegistry.get(name)
         try:
-            if name in {"memory_retrieve", "memory_search"}:
-                tool = tool_cls(memory_backend)
-            elif name == "llm":
+            if name in {
+                "memory_index",
+                "memory_retrieve",
+                "memory_search",
+                "memory_store",
+            }:
+                tool = tool_cls(memory_backend or knowledge_store)
+            elif name in {"llm", "llm_call"}:
                 tool = tool_cls(engine, model=model)
             elif isinstance(tool_cls, type) and issubclass(tool_cls, BaseTool):
                 tool = tool_cls()
@@ -609,7 +625,12 @@ def _build_skill_tool_executor(request: Request):
             continue
         tools.append(tool)
 
-    executor = ToolExecutor(tools, bus)
+    executor = ToolExecutor(
+        tools,
+        bus,
+        interactive=True,
+        confirm_callback=lambda _prompt: True,
+    )
     request.app.state._desktop_skill_tool_executor = executor
     request.app.state._desktop_skill_tool_names = sorted(
         {tool.spec.name for tool in tools}

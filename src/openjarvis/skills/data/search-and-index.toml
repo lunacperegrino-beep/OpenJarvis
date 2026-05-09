@@ -6,7 +6,7 @@ author = "openjarvis"
 
 [[skill.steps]]
 tool_name = "shell_exec"
-arguments_template = '{"command": "find {directory} -type f \\( -name \"*.txt\" -o -name \"*.md\" -o -name \"*.pdf\" \\) | head -50"}'
+arguments_template = '{"command": "find \"{directory}\" -type f \\( -name \"*.txt\" -o -name \"*.md\" -o -name \"*.pdf\" \\) | head -50"}'
 output_key = "found_files"
 
 [[skill.steps]]

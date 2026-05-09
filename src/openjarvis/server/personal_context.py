@@ -6,6 +6,7 @@ import json
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from string import printable
 from typing import Any
 
 from openjarvis.connectors.store import KnowledgeStore
@@ -50,6 +51,8 @@ _NOTES_TERMS = (
 _SEARCH_STOPWORDS = {
     "about",
     "and",
+    "apple",
+    "app",
     "are",
     "como",
     "com",
@@ -63,6 +66,7 @@ _SEARCH_STOPWORDS = {
     "meus",
     "minha",
     "my",
+    "note",
     "notes",
     "nota",
     "notas",
@@ -255,26 +259,84 @@ def _load_apple_music_tracks(store: KnowledgeStore) -> list[_Track]:
 
 
 def _build_apple_notes_context(query: str, store: KnowledgeStore) -> str:
+    search_terms = _search_query_terms(query)
     try:
         results = store.retrieve(
-            _search_query_terms(query),
+            search_terms,
             top_k=8,
             source="apple_notes",
         )
     except Exception:
-        return ""
+        results = []
 
-    if not results:
-        return ""
+    readable_results = [
+        result for result in results if _is_readable_snippet(result.content)
+    ]
+    if not readable_results:
+        return _build_apple_notes_fallback_context(query, search_terms, store)
 
     lines = ["Relevant Apple Notes snippets:"]
-    for index, result in enumerate(results, start=1):
+    for index, result in enumerate(readable_results, start=1):
         title = str(result.metadata.get("title") or "").strip()
         heading = f"{index}. {title}" if title else f"{index}."
-        content = " ".join(result.content.split())
-        if len(content) > 700:
-            content = content[:697].rstrip() + "..."
+        content = _snippet(result.content)
         lines.append(f"{heading} {content}")
+
+    return "\n".join(lines)
+
+
+def _build_apple_notes_fallback_context(
+    query: str,
+    search_terms: str,
+    store: KnowledgeStore,
+) -> str:
+    try:
+        count_row = store._conn.execute(
+            "SELECT COUNT(DISTINCT doc_id) FROM knowledge_chunks "
+            "WHERE source = 'apple_notes'"
+        ).fetchone()
+        note_count = int(count_row[0] or 0) if count_row else 0
+        rows = store._conn.execute(
+            """
+            SELECT title, content, timestamp
+            FROM knowledge_chunks
+            WHERE source = 'apple_notes' AND chunk_index = 0
+            ORDER BY timestamp DESC, created_at DESC
+            LIMIT 30
+            """
+        ).fetchall()
+    except Exception:
+        return ""
+
+    if note_count == 0:
+        return ""
+
+    lines = [
+        "Apple Notes is connected and indexed, but no readable exact matches "
+        f"were found for query terms '{search_terms or query}'.",
+        f"Indexed Apple Notes count: {note_count}.",
+    ]
+
+    samples: list[str] = []
+    for row in rows:
+        title = str(row["title"] or "Untitled note").strip()
+        content = str(row["content"] or "")
+        if not _is_readable_snippet(content):
+            continue
+        samples.append(f"- {title}: {_snippet(content, max_chars=260)}")
+        if len(samples) >= 5:
+            break
+
+    if samples:
+        lines.append("Readable recent/indexed Apple Notes examples:")
+        lines.extend(samples)
+    else:
+        lines.append(
+            "The current Apple Notes index contains note records, but their "
+            "stored text is not readable enough to answer content questions. "
+            "Ask the user to re-sync Apple Notes after the cleaner sync path is "
+            "available."
+        )
 
     return "\n".join(lines)
 
@@ -289,6 +351,30 @@ def _json_obj(value: Any) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _snippet(content: str, *, max_chars: int = 700) -> str:
+    text = " ".join(content.split())
+    if len(text) > max_chars:
+        text = text[: max_chars - 3].rstrip() + "..."
+    return text
+
+
+def _is_readable_snippet(content: str) -> bool:
+    text = " ".join(content.split())
+    if len(text) < 3:
+        return False
+
+    ascii_printable = set(printable)
+    printable_count = sum(
+        1 for char in text if char in ascii_printable or char.isprintable()
+    )
+    alnum_count = sum(1 for char in text if char.isalnum())
+    if printable_count / max(len(text), 1) < 0.9:
+        return False
+    if alnum_count / max(len(text), 1) < 0.25:
+        return False
+    return True
 
 
 def _search_query_terms(query: str) -> str:

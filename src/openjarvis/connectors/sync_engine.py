@@ -97,6 +97,7 @@ class SyncEngine:
         )
         if full:
             prior_items = 0
+            self._pipeline.clear_source(connector_id)
         else:
             prior_items = checkpoint["items_synced"] if checkpoint else 0
 

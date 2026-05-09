@@ -995,6 +995,12 @@ async def channels_overview(request: Request):
         active = getattr(bridge, "_channels", None)
         if isinstance(active, dict):
             active_adapters = sorted(str(key) for key in active.keys())
+    else:
+        bridge_status = "standby"
+        bridge_message = (
+            "The runtime bridge routes messaging apps to agents. It starts "
+            "automatically after a channel is configured and bound."
+        )
 
     agents = manager.list_agents() if manager is not None else []
     bindings: list[dict[str, Any]] = []

@@ -356,6 +356,19 @@ class KnowledgeStore(MemoryBackend):
         )
         self._conn.commit()
 
+    def clear_source(self, source: str) -> int:
+        """Remove all chunks for *source* and return the number deleted."""
+        if not source:
+            return 0
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM knowledge_chunks WHERE source = ?",
+            (source,),
+        ).fetchone()
+        deleted = int(row[0] or 0) if row else 0
+        self._conn.execute("DELETE FROM knowledge_chunks WHERE source = ?", (source,))
+        self._conn.commit()
+        return deleted
+
     # ------------------------------------------------------------------
     # Extra helpers
     # ------------------------------------------------------------------

@@ -92,4 +92,27 @@ class LLMTool(BaseTool):
             )
 
 
-__all__ = ["LLMTool"]
+@ToolRegistry.register("llm_call")
+class LLMCallTool(LLMTool):
+    """Backward-compatible alias for skill manifests that use ``llm_call``."""
+
+    tool_id = "llm_call"
+
+    @property
+    def spec(self) -> ToolSpec:
+        base = super().spec
+        return ToolSpec(
+            name="llm_call",
+            description=base.description,
+            parameters=base.parameters,
+            category=base.category,
+            cost_estimate=base.cost_estimate,
+            latency_estimate=base.latency_estimate,
+            requires_confirmation=base.requires_confirmation,
+            timeout_seconds=base.timeout_seconds,
+            required_capabilities=base.required_capabilities,
+            metadata=base.metadata,
+        )
+
+
+__all__ = ["LLMCallTool", "LLMTool"]

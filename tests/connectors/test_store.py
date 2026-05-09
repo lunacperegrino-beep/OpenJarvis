@@ -217,6 +217,18 @@ def test_clear(ks: KnowledgeStore) -> None:
     assert len(after) == 0
 
 
+def test_clear_source_removes_only_matching_source(ks: KnowledgeStore) -> None:
+    """clear_source() removes one connector's chunks without touching others."""
+    _store(ks, content="Apple note document", source="apple_notes")
+    _store(ks, content="Music document", source="apple_music")
+
+    deleted = ks.clear_source("apple_notes")
+
+    assert deleted == 1
+    assert ks.retrieve("Apple note", source="apple_notes") == []
+    assert len(ks.retrieve("Music document", source="apple_music")) == 1
+
+
 def test_store_with_metadata(ks: KnowledgeStore) -> None:
     """Extra metadata and thread_id are preserved in retrieval results."""
     custom_meta = {"labels": ["important", "action-needed"], "priority": "high"}

@@ -24,8 +24,10 @@ bytes, decoding to UTF-8, and stripping protobuf control bytes.
 from __future__ import annotations
 
 import gzip
+import html
 import re
 import sqlite3
+import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator, List, Optional
@@ -90,9 +92,22 @@ def _extract_text_from_zdata(zdata: bytes) -> str:
     except Exception:  # noqa: BLE001
         return ""
 
-    text = raw.decode("utf-8", errors="replace")
+    return _html_to_text(raw.decode("utf-8", errors="replace"))
+
+
+def _html_to_text(text: str) -> str:
+    """Convert Apple Notes HTML/protobuf text fragments to readable text."""
+    text = re.sub(
+        r"<img\b[^>]*\bsrc=[\"']data:image/[^>]+>",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"<\s*br\s*/?\s*>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"</\s*(div|p|h[1-6]|li|tr)\s*>", "\n", text, flags=re.IGNORECASE)
     # Strip HTML tags (replace with space to preserve word boundaries)
     text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(text)
     # Strip non-printable control bytes and U+FFFD replacement chars that
     # come from the protobuf wire format.
     cleaned = re.sub(r"[\x00-\x09\x0b\x0c\x0e-\x1f\x7f-\x9f\ufffd]+", " ", text)
@@ -100,6 +115,56 @@ def _extract_text_from_zdata(zdata: bytes) -> str:
     cleaned = re.sub(r" {2,}", " ", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()
+
+
+_AS_ROW_SEP = "\x1e"
+_AS_COL_SEP = "\x1f"
+
+
+def _notes_from_applescript() -> list[tuple[str, str, str, str]]:
+    """Read Notes through macOS automation for cleaner rich-text extraction."""
+    script = """
+set rowSep to ASCII character 30
+set colSep to ASCII character 31
+tell application "Notes"
+    set output to ""
+    repeat with n in notes
+        set noteId to id of n as text
+        set noteName to name of n as text
+        set noteBody to body of n as text
+        set noteModified to modification date of n as text
+        set rowText to noteId & colSep & noteName & colSep & noteModified
+        set output to output & rowText & colSep & noteBody & rowSep
+    end repeat
+    return output
+end tell
+"""
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=45,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return []
+
+    records: list[tuple[str, str, str, str]] = []
+    for raw_row in proc.stdout.split(_AS_ROW_SEP):
+        if not raw_row.strip():
+            continue
+        parts = raw_row.split(_AS_COL_SEP, 3)
+        if len(parts) != 4:
+            continue
+        note_id, title, modified, body = parts
+        content = _html_to_text(body)
+        if title.strip() or content.strip():
+            records.append((note_id.strip(), title.strip(), modified.strip(), content))
+    return records
 
 
 def _notes_database_error(exc: sqlite3.OperationalError) -> str:
@@ -200,6 +265,28 @@ class AppleNotesConnector(BaseConnector):
                 "Apple Notes database was not found. Open Apple Notes once, "
                 "then try syncing again."
             )
+            return
+
+        applescript_records = _notes_from_applescript()
+        if applescript_records:
+            self._items_total = len(applescript_records)
+            synced = 0
+            for note_id, title, _modified, content in applescript_records:
+                doc = Document(
+                    doc_id=f"apple_notes:{note_id}",
+                    source="apple_notes",
+                    doc_type="note",
+                    content=content,
+                    title=title,
+                    timestamp=datetime.now(tz=timezone.utc),
+                )
+                synced += 1
+                yield doc
+
+            self._items_synced = synced
+            self._state = "idle"
+            self._last_sync = datetime.now(tz=timezone.utc)
+            self._error = None
             return
 
         try:

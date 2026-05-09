@@ -82,6 +82,16 @@ class TestSkillRoutes:
         assert "skills" in data
         assert "roots" in data
         assert any(skill["name"] == "daily-digest" for skill in data["skills"])
+        assert data["execution"]["blocked_tools"] == []
+
+    def test_shell_and_llm_skills_are_desktop_ready(self):
+        client = TestClient(_make_app())
+        resp = client.get("/v1/skills")
+        assert resp.status_code == 200
+        skills = {skill["name"]: skill for skill in resp.json()["skills"]}
+
+        assert skills["file-deduplicator"]["run_ready"] is True
+        assert skills["translate-doc"]["run_ready"] is True
 
     def test_get_builtin_skill_detail(self):
         client = TestClient(_make_app())

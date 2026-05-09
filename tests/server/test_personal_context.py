@@ -94,6 +94,24 @@ def test_notes_query_includes_apple_notes_snippets(tmp_path: Path) -> None:
     assert "follow-up paperwork" in context
 
 
+def test_notes_query_reports_connected_when_no_readable_match(tmp_path: Path) -> None:
+    store = KnowledgeStore(tmp_path / "knowledge.db")
+    store.store(
+        "%%%% ((( \x00 \x01",
+        source="apple_notes",
+        doc_type="note",
+        title="Unreadable",
+    )
+
+    context = build_personal_data_context(
+        "What do my Apple Notes say about travel?",
+        store,
+    )
+
+    assert "Apple Notes is connected and indexed" in context
+    assert "no readable exact matches" in context
+
+
 def test_unrelated_query_does_not_inject_context(tmp_path: Path) -> None:
     store = KnowledgeStore(tmp_path / "knowledge.db")
     _store_music_track(store, name="Song A", artist="Artist One", play_count=9)

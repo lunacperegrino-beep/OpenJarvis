@@ -62,6 +62,12 @@ class IngestionPipeline:
         ).fetchall()
         self._seen_doc_ids = {r[0] for r in rows}
 
+    def clear_source(self, source: str) -> int:
+        """Clear existing chunks for a source before a replacement sync."""
+        deleted = self._store.clear_source(source)
+        self._load_existing_doc_ids()
+        return deleted
+
     def _extract_attachment_text(self, att: Attachment) -> str:
         """Extract text from an attachment.
 

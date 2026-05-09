@@ -170,9 +170,11 @@ class SkillExecutor:
         def _replace(match: re.Match) -> str:
             key = match.group(1)
             val = ctx.get(key, match.group(0))
-            if isinstance(val, str):
-                return val
-            return json.dumps(val)
+            if not isinstance(val, str):
+                val = json.dumps(val)
+            # Skill templates are JSON strings. Insert escaped string content
+            # so multiline tool output stays valid JSON for the next step.
+            return json.dumps(val)[1:-1]
 
         return re.sub(r"\{(\w+)\}", _replace, template)
 

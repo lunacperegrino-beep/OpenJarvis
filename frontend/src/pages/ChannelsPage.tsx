@@ -26,7 +26,7 @@ import {
 } from '../lib/api';
 import { useAppStore } from '../lib/store';
 
-type ChannelState = 'active' | 'configured' | 'bound' | 'available' | 'missing';
+type ChannelState = 'active' | 'configured' | 'bound' | 'available' | 'standby' | 'missing';
 
 const PRIORITY_ORDER = ['sendblue', 'slack', 'telegram', 'signal', 'whatsapp', 'discord', 'teams'];
 
@@ -202,12 +202,12 @@ export function ChannelsPage() {
                   <div className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>
                     Runtime Bridge
                   </div>
-                  <StatusPill status={overview.bridge.status} state={overview.bridge.configured ? 'active' : 'missing'} />
+                  <StatusPill status={bridgeStatusLabel(overview.bridge.status)} state={bridgeState(overview)} />
                 </div>
                 <div className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
                   {overview.bridge.configured
                     ? `${overview.bridge.active_adapters.length} active adapter(s): ${overview.bridge.active_adapters.join(', ') || 'none'}`
-                    : 'No channel bridge is currently configured.'}
+                    : 'The bridge is on standby until you configure a messaging channel.'}
                 </div>
                 {overview.bridge.message && (
                   <div className="mt-2 break-words text-xs" style={{ color: 'var(--color-warning)' }}>
@@ -603,8 +603,20 @@ function stateColor(state: ChannelState): string {
   if (state === 'active') return 'var(--color-success)';
   if (state === 'configured') return 'var(--color-accent)';
   if (state === 'bound') return 'var(--color-warning)';
+  if (state === 'standby') return 'var(--color-text-tertiary)';
   if (state === 'available') return 'var(--color-text-tertiary)';
   return 'var(--color-error)';
+}
+
+function bridgeState(overview: ChannelOverview): ChannelState {
+  if (overview.bridge.active_adapters.length > 0) return 'active';
+  if (overview.bridge.configured) return 'configured';
+  return 'standby';
+}
+
+function bridgeStatusLabel(status: string): string {
+  if (status === 'not_configured') return 'standby';
+  return status;
 }
 
 function fieldLabel(value: string): string {

@@ -6,7 +6,7 @@ author = "openjarvis"
 
 [[skill.steps]]
 tool_name = "shell_exec"
-arguments_template = '{"command": "find {directory} -type f -exec md5sum {} \\; | sort"}'
+arguments_template = '{"command": "find \"{directory}\" -type f -exec shasum -a 256 {} \\; | sort"}'
 output_key = "checksums"
 
 [[skill.steps]]

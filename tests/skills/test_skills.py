@@ -132,6 +132,29 @@ class TestSkillExecutor:
         assert result.success
         assert result.context.get("result") == "hi"
 
+    def test_template_escapes_multiline_step_output(self):
+        executor = self._make_executor()
+        manifest = SkillManifest(
+            name="escaped_output",
+            steps=[
+                SkillStep(
+                    tool_name="echo",
+                    arguments_template='{"text": "first\\nsecond \\"quoted\\""}',
+                    output_key="echoed",
+                ),
+                SkillStep(
+                    tool_name="upper",
+                    arguments_template='{"text": "{echoed}"}',
+                    output_key="uppered",
+                ),
+            ],
+        )
+
+        result = executor.run(manifest)
+
+        assert result.success
+        assert result.context.get("uppered") == 'FIRST\nSECOND "QUOTED"'
+
     def test_events_emitted(self):
         bus = EventBus(record_history=True)
         tools = [EchoTool()]
