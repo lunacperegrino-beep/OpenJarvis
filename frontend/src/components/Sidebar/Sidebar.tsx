@@ -23,6 +23,8 @@ import {
   Wifi,
   CalendarDays,
   Wrench,
+  MoreHorizontal,
+  type LucideIcon,
 } from 'lucide-react';
 import { ConversationList } from './ConversationList';
 import { useAppStore } from '../../lib/store';
@@ -31,6 +33,7 @@ export function Sidebar() {
   const navigate = useNavigate();
   const location = useLocation();
   const [searchQuery, setSearchQuery] = useState('');
+  const [moreExpanded, setMoreExpanded] = useState(false);
 
   const sidebarOpen = useAppStore((s) => s.sidebarOpen);
   const toggleSidebar = useAppStore((s) => s.toggleSidebar);
@@ -57,21 +60,26 @@ export function Sidebar() {
     navigate('/');
   };
 
-  const navItems = [
+  const primaryNavItems = [
     { path: '/', icon: MessageSquare, label: 'Chat' },
     { path: '/dashboard', icon: BarChart3, label: 'Dashboard' },
     { path: '/data-sources', icon: Database, label: 'Data Sources' },
     { path: '/agents', icon: Bot, label: 'Agents' },
     { path: '/tasks', icon: History, label: 'Tasks' },
+    { path: '/artifacts', icon: Archive, label: 'Artifacts' },
+    { path: '/settings', icon: Settings, label: 'Settings' },
+  ];
+
+  const secondaryNavItems = [
     { path: '/channels', icon: Wifi, label: 'Channels' },
     { path: '/digest', icon: CalendarDays, label: 'Daily Brief' },
     { path: '/skills', icon: Wrench, label: 'Skills' },
-    { path: '/artifacts', icon: Archive, label: 'Artifacts' },
     { path: '/diagnostics', icon: Stethoscope, label: 'Diagnostics' },
     { path: '/logs', icon: ScrollText, label: 'Logs' },
-    { path: '/settings', icon: Settings, label: 'Settings' },
     { path: '/get-started', icon: Rocket, label: 'Get Started' },
   ];
+  const activeSecondary = secondaryNavItems.some((item) => location.pathname === item.path);
+  const showSecondaryNav = moreExpanded || activeSecondary;
 
   return (
     <>
@@ -101,9 +109,9 @@ export function Sidebar() {
           borderRight: sidebarOpen ? '1px solid var(--color-border)' : 'none',
         }}
       >
-        <div className="flex flex-col h-full w-[260px]">
+        <div className="flex flex-col h-full w-[260px] min-h-0">
           {/* Header */}
-          <div className="flex items-center justify-between px-3 pt-3 pb-2">
+          <div className="flex items-center justify-between px-3 pt-3 pb-2 shrink-0">
             <button
               onClick={toggleSidebar}
               className="p-2 rounded-lg transition-colors cursor-pointer"
@@ -140,7 +148,7 @@ export function Sidebar() {
           {/* Model badge */}
           <button
             onClick={() => setCommandPaletteOpen(true)}
-            className="mx-3 mb-2 flex items-center gap-2 px-3 py-2 rounded-lg text-xs transition-colors cursor-pointer"
+            className="mx-3 mb-2 flex items-center gap-2 px-3 py-2 rounded-lg text-xs transition-colors cursor-pointer shrink-0"
             style={{
               background: 'var(--color-bg-secondary)',
               color: 'var(--color-text-secondary)',
@@ -175,7 +183,7 @@ export function Sidebar() {
           </button>
 
           {/* Search */}
-          <div className="px-3 mb-2">
+          <div className="px-3 mb-2 shrink-0">
             <div
               className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm"
               style={{ background: 'var(--color-bg-secondary)', border: '1px solid var(--color-border)' }}
@@ -193,49 +201,107 @@ export function Sidebar() {
           </div>
 
           {/* Conversation list */}
-          <div className="flex-1 overflow-y-auto px-2">
+          <div className="flex-1 min-h-0 overflow-y-auto px-2">
             <ConversationList searchQuery={searchQuery} />
           </div>
 
           {/* Bottom nav */}
-          <nav className="px-2 pb-3 pt-2 flex flex-col gap-0.5" style={{ borderTop: '1px solid var(--color-border)' }}>
-            {navItems.map((item) => {
-              const isActive = location.pathname === item.path;
-              return (
-                <button
-                  key={item.path}
-                  onClick={() => navigate(item.path)}
-                  className="relative flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors w-full text-left cursor-pointer"
+          <nav className="px-2 pb-3 pt-2 flex flex-col gap-0.5 shrink-0" style={{ borderTop: '1px solid var(--color-border)' }}>
+            {primaryNavItems.map((item) => (
+              <NavButton
+                key={item.path}
+                item={item}
+                isActive={location.pathname === item.path}
+                onClick={() => navigate(item.path)}
+              />
+            ))}
+            <button
+              onClick={() => setMoreExpanded((value) => !value)}
+              className="relative flex items-center gap-3 px-3 py-1.5 rounded-lg text-xs transition-colors w-full text-left cursor-pointer"
+              style={{
+                background: activeSecondary ? 'var(--color-accent-subtle)' : 'transparent',
+                color: activeSecondary ? 'var(--color-text)' : 'var(--color-text-secondary)',
+                fontWeight: activeSecondary ? 500 : 400,
+              }}
+              onMouseEnter={(e) => {
+                if (!activeSecondary) e.currentTarget.style.background = 'var(--color-bg-secondary)';
+              }}
+              onMouseLeave={(e) => {
+                if (!activeSecondary) e.currentTarget.style.background = 'transparent';
+              }}
+            >
+              {activeSecondary && (
+                <span
+                  aria-hidden="true"
+                  className="absolute left-0 top-1.5 bottom-1.5 w-[2px] rounded-full"
                   style={{
-                    background: isActive ? 'var(--color-accent-subtle)' : 'transparent',
-                    color: isActive ? 'var(--color-text)' : 'var(--color-text-secondary)',
-                    fontWeight: isActive ? 500 : 400,
+                    background: 'var(--color-accent)',
+                    boxShadow: '0 0 8px var(--color-accent-glow)',
                   }}
-                  onMouseEnter={(e) => {
-                    if (!isActive) e.currentTarget.style.background = 'var(--color-bg-secondary)';
-                  }}
-                  onMouseLeave={(e) => {
-                    if (!isActive) e.currentTarget.style.background = 'transparent';
-                  }}
-                >
-                  {isActive && (
-                    <span
-                      aria-hidden="true"
-                      className="absolute left-0 top-1.5 bottom-1.5 w-[2px] rounded-full"
-                      style={{
-                        background: 'var(--color-accent)',
-                        boxShadow: '0 0 8px var(--color-accent-glow)',
-                      }}
-                    />
-                  )}
-                  <item.icon size={16} style={isActive ? { color: 'var(--color-accent)' } : undefined} />
-                  {item.label}
-                </button>
-              );
-            })}
+                />
+              )}
+              <MoreHorizontal size={15} style={activeSecondary ? { color: 'var(--color-accent)' } : undefined} />
+              More
+            </button>
+            {showSecondaryNav && (
+              <div className="pl-2">
+                {secondaryNavItems.map((item) => (
+                  <NavButton
+                    key={item.path}
+                    item={item}
+                    isActive={location.pathname === item.path}
+                    onClick={() => navigate(item.path)}
+                    compact
+                  />
+                ))}
+              </div>
+            )}
           </nav>
         </div>
       </aside>
     </>
+  );
+}
+
+function NavButton({
+  item,
+  isActive,
+  onClick,
+  compact = false,
+}: {
+  item: { path: string; icon: LucideIcon; label: string };
+  isActive: boolean;
+  onClick: () => void;
+  compact?: boolean;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`relative flex items-center gap-3 px-3 ${compact ? 'py-1' : 'py-1.5'} rounded-lg text-xs transition-colors w-full text-left cursor-pointer`}
+      style={{
+        background: isActive ? 'var(--color-accent-subtle)' : 'transparent',
+        color: isActive ? 'var(--color-text)' : 'var(--color-text-secondary)',
+        fontWeight: isActive ? 500 : 400,
+      }}
+      onMouseEnter={(e) => {
+        if (!isActive) e.currentTarget.style.background = 'var(--color-bg-secondary)';
+      }}
+      onMouseLeave={(e) => {
+        if (!isActive) e.currentTarget.style.background = 'transparent';
+      }}
+    >
+      {isActive && (
+        <span
+          aria-hidden="true"
+          className="absolute left-0 top-1.5 bottom-1.5 w-[2px] rounded-full"
+          style={{
+            background: 'var(--color-accent)',
+            boxShadow: '0 0 8px var(--color-accent-glow)',
+          }}
+        />
+      )}
+      <item.icon size={15} style={isActive ? { color: 'var(--color-accent)' } : undefined} />
+      {item.label}
+    </button>
   );
 }

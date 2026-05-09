@@ -137,6 +137,11 @@ except ImportError:
     pass
 
 try:
+    import openjarvis.tools.apple_notes_tool  # noqa: F401
+except ImportError:
+    pass
+
+try:
     import openjarvis.tools.knowledge_tools  # noqa: F401
 except ImportError:
     pass

@@ -79,10 +79,27 @@ def _inject_desktop_tool_deps(
     name = tool.spec.name
     if name in _MEMORY_TOOL_NAMES and hasattr(tool, "_backend"):
         tool._backend = memory_backend or knowledge_store
+    elif name == "notes" and hasattr(tool, "_store"):
+        tool._store = knowledge_store
     elif name in _KNOWLEDGE_TOOL_NAMES and hasattr(tool, "_store"):
         tool._store = knowledge_store
     elif name.startswith("channel_") and hasattr(tool, "_channel"):
         tool._channel = channel_backend
+
+
+def _merge_mcp_tools(tools: list, discovered: list) -> None:
+    """Append MCP tools without letting them override native desktop tools."""
+    existing = {tool.spec.name: tool for tool in tools}
+    for tool in discovered:
+        name = tool.spec.name
+        current = existing.get(name)
+        if current is not None:
+            if hasattr(current, "set_fallback_tool"):
+                current.set_fallback_tool(tool)
+            logger.info("Skipping MCP tool '%s' because a native tool exists", name)
+            continue
+        tools.append(tool)
+        existing[name] = tool
 
 
 @click.command()
@@ -321,7 +338,7 @@ def serve(
                                 client = MCPClient(transport)
                                 client.initialize()
                                 discovered = MCPToolProvider(client).discover()
-                                tools.extend(discovered)
+                                _merge_mcp_tools(tools, discovered)
                         except Exception as _exc:
                             logger.warning(
                                 "Failed to load external MCP tools: %s",
