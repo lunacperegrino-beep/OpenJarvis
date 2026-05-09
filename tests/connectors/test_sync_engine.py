@@ -127,7 +127,46 @@ def test_sync_saves_checkpoint(engine: SyncEngine) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 3: sync_status_for_unsynced — None for unknown connector
+# Test 3: full sync ignores checkpoint
+# ---------------------------------------------------------------------------
+
+
+def test_full_sync_ignores_checkpoint(
+    pipeline: IngestionPipeline, store: KnowledgeStore, tmp_path: Path
+) -> None:
+    """A full sync replays documents even after an incremental checkpoint."""
+
+    class SinceFilteringConnector(StubConnector):
+        def __init__(self, docs: List[Document]) -> None:
+            super().__init__(docs)
+            self.received_since: List[Optional[datetime]] = []
+
+        def sync(
+            self,
+            *,
+            since: Optional[datetime] = None,
+            cursor: Optional[str] = None,
+        ) -> Iterator[Document]:
+            self.received_since.append(since)
+            if since is None:
+                yield from self._docs
+
+    docs = [_make_doc("full:doc:0", content="Replayable full sync content")]
+    connector = SinceFilteringConnector(docs)
+    engine = SyncEngine(pipeline, state_db=str(tmp_path / "full_sync_state.db"))
+
+    assert engine.sync(connector) == 1
+    assert engine.sync(connector) == 0
+    assert engine.sync(connector, full=True) == 0
+
+    assert connector.received_since[0] is None
+    assert connector.received_since[1] is not None
+    assert connector.received_since[2] is None
+    assert store.count() == 1
+
+
+# ---------------------------------------------------------------------------
+# Test 4: sync_status_for_unsynced — None for unknown connector
 # ---------------------------------------------------------------------------
 
 

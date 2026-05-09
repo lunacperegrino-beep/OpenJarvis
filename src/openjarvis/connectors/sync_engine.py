@@ -76,12 +76,14 @@ class SyncEngine:
     # Public API
     # ------------------------------------------------------------------
 
-    def sync(self, connector: BaseConnector) -> int:
+    def sync(self, connector: BaseConnector, *, full: bool = False) -> int:
         """Run a full sync for *connector* and return the number of items ingested.
 
-        Resumes from the last saved cursor if one exists.  Documents are
-        batched in groups of 100 before being handed to the pipeline; a
-        checkpoint is saved after every batch and once more at the end.
+        Resumes from the last saved cursor if one exists, unless ``full`` is
+        set.  A full sync ignores the saved checkpoint and asks the connector
+        to replay all available documents.  Documents are batched in groups of
+        100 before being handed to the pipeline; a checkpoint is saved after
+        every batch and once more at the end.
 
         On error the checkpoint is updated with the error message and the
         exception is re-raised so callers can handle it.
@@ -90,11 +92,16 @@ class SyncEngine:
 
         # Load any previous checkpoint so we can resume.
         checkpoint = self.get_checkpoint(connector_id)
-        prior_cursor: Optional[str] = checkpoint["cursor"] if checkpoint else None
-        prior_items: int = checkpoint["items_synced"] if checkpoint else 0
+        prior_cursor: Optional[str] = (
+            None if full else checkpoint["cursor"] if checkpoint else None
+        )
+        if full:
+            prior_items = 0
+        else:
+            prior_items = checkpoint["items_synced"] if checkpoint else 0
 
         since: Optional[datetime] = None
-        if checkpoint and checkpoint.get("last_sync"):
+        if not full and checkpoint and checkpoint.get("last_sync"):
             try:
                 since = datetime.fromisoformat(checkpoint["last_sync"])
             except (ValueError, TypeError):

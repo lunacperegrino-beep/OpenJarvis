@@ -102,9 +102,8 @@ def create_connectors_router():
             _instances[connector_id] = cls()
         return _instances[connector_id]
 
-    def _connector_summary(connector_id: str, instance: Any) -> Dict[str, Any]:
-        """Build the dict returned by GET /connectors."""
-        chunks = 0
+    def _source_chunk_count(connector_id: str) -> int:
+        """Return indexed chunk count for a connector source."""
         try:
             from openjarvis.connectors.store import KnowledgeStore
 
@@ -113,10 +112,13 @@ def create_connectors_router():
                 "SELECT COUNT(*) FROM knowledge_chunks WHERE source = ?",
                 (connector_id,),
             ).fetchone()
-            chunks = rows[0] if rows else 0
+            return rows[0] if rows else 0
         except Exception:
-            pass
+            return 0
 
+    def _connector_summary(connector_id: str, instance: Any) -> Dict[str, Any]:
+        """Build the dict returned by GET /connectors."""
+        chunks = _source_chunk_count(connector_id)
         return {
             "connector_id": connector_id,
             "display_name": getattr(instance, "display_name", connector_id),
@@ -263,7 +265,10 @@ def create_connectors_router():
                     store = KnowledgeStore()
                     pipeline = IngestionPipeline(store)
                     engine = SyncEngine(pipeline)
-                    engine.sync(instance)
+                    engine.sync(
+                        instance,
+                        full=_source_chunk_count(connector_id) == 0,
+                    )
                     logger.info(
                         "Auto-ingested %s after connect",
                         connector_id,
@@ -445,7 +450,7 @@ def create_connectors_router():
     _sync_state: Dict[str, Dict[str, Any]] = {}  # {connector_id: {state, error}}
 
     @router.post("/{connector_id}/sync")
-    def trigger_sync(connector_id: str) -> Dict[str, Any]:
+    def trigger_sync(connector_id: str, full: bool = False) -> Dict[str, Any]:
         """Trigger a sync in the background and return immediately."""
         import threading
 
@@ -470,6 +475,11 @@ def create_connectors_router():
                 "status": "already_syncing",
             }
 
+        # If there is no index for this source yet, ignore stale incremental
+        # checkpoints. This fixes local sources such as Apple Notes after a
+        # previous failed or empty sync wrote a last_sync timestamp.
+        run_full_sync = full or _source_chunk_count(connector_id) == 0
+
         # Mark as syncing immediately so the UI picks it up
         _sync_state[connector_id] = {"state": "syncing", "error": None}
 
@@ -482,7 +492,7 @@ def create_connectors_router():
                 store = KnowledgeStore()
                 pipeline = IngestionPipeline(store=store)
                 engine = SyncEngine(pipeline=pipeline)
-                engine.sync(inst)
+                engine.sync(inst, full=run_full_sync)
                 logger.info("Sync completed for %s", connector_id)
                 _sync_state[connector_id] = {"state": "complete", "error": None}
             except Exception as exc:
@@ -505,6 +515,7 @@ def create_connectors_router():
         return {
             "connector_id": connector_id,
             "status": "started",
+            "full": run_full_sync,
         }
 
     @router.get("/{connector_id}/sync")

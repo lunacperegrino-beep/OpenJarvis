@@ -8,18 +8,24 @@ import pytest
 
 
 @pytest.fixture
-def app():
+def app(tmp_path, monkeypatch):
     try:
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
     except ImportError:
         pytest.skip("fastapi not installed")
 
-    from openjarvis.server.connectors_router import create_connectors_router
+    import openjarvis.connectors.sync_engine as sync_engine
+    import openjarvis.core.config as config
+    import openjarvis.server.connectors_router as connectors_router
+
+    monkeypatch.setattr(config, "DEFAULT_CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(sync_engine, "DEFAULT_CONFIG_DIR", tmp_path)
+    connectors_router._instances.clear()
 
     _app = FastAPI()
-    router = create_connectors_router()
-    _app.include_router(router, prefix="/v1")
+    router = connectors_router.create_connectors_router()
+    _app.include_router(router)
     return TestClient(_app)
 
 
@@ -91,4 +97,4 @@ def test_trigger_sync(app, tmp_path: Path) -> None:
     resp = app.post("/v1/connectors/obsidian/sync")
     assert resp.status_code == 200
     data = resp.json()
-    assert data["chunks_indexed"] >= 1
+    assert data["status"] in {"started", "already_syncing"}

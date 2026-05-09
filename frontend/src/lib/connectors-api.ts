@@ -41,8 +41,12 @@ export async function getSyncStatus(id: string): Promise<SyncStatus> {
   return res.json();
 }
 
-export async function triggerSync(id: string): Promise<{ connector_id: string; chunks_indexed: number; status: string }> {
-  const res = await fetch(`${getBase()}/v1/connectors/${encodeURIComponent(id)}/sync`, {
+export async function triggerSync(
+  id: string,
+  options: { full?: boolean } = {},
+): Promise<{ connector_id: string; chunks_indexed?: number; status: string; full?: boolean }> {
+  const query = options.full ? '?full=true' : '';
+  const res = await fetch(`${getBase()}/v1/connectors/${encodeURIComponent(id)}/sync${query}`, {
     method: 'POST',
   });
   if (!res.ok) {

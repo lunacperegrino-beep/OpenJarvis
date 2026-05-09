@@ -326,8 +326,12 @@ const syncHints: Record<string, string> = {
   hackernews: 'Public tech stories; no account or personal data involved.',
 };
 
-function pendingSyncLabel(connectorId: string, hasSynced: boolean): string {
-  if (hasSynced) return 'Synced - 0 items found';
+function pendingSyncLabel(connectorId: string, hasSynced: boolean, sync?: SyncStatus): string {
+  if (hasSynced && sync?.items_total && sync.items_total > 0) {
+    const unit = connectorId === 'apple_notes' ? 'notes' : 'items';
+    return `Found ${sync.items_total.toLocaleString()} ${unit} - needs full re-sync`;
+  }
+  if (hasSynced) return 'Synced - no items found';
   return pendingSyncLabels[connectorId] ?? 'Connected - not synced yet';
 }
 
@@ -356,7 +360,8 @@ function SyncStatusDisplay({
     setSyncing(true);
     setSyncError('');
     try {
-      await triggerSync(connectorId);
+      const needsFullSync = chunks === 0 && sync?.last_sync != null;
+      await triggerSync(connectorId, { full: needsFullSync });
       onSyncTriggered();
     } catch (err: any) {
       setSyncError(err.message || 'Sync failed');
@@ -485,7 +490,7 @@ function SyncStatusDisplay({
     <div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <span style={{ fontSize: 12, color: 'var(--color-text-tertiary)' }}>
-          {pendingSyncLabel(connectorId, hasSynced)}
+          {pendingSyncLabel(connectorId, hasSynced, sync)}
         </span>
         <button
           onClick={handleSync}
@@ -497,7 +502,7 @@ function SyncStatusDisplay({
             cursor: 'pointer', fontWeight: 600,
             opacity: syncing ? 0.5 : 1,
           }}
-        >{syncing ? 'Syncing...' : hasSynced ? 'Re-sync' : 'Sync Now'}</button>
+        >{syncing ? 'Syncing...' : hasSynced ? 'Full re-sync' : 'Sync Now'}</button>
       </div>
       {!hasSynced && hint && (
         <div style={{ fontSize: 10, color: 'var(--color-text-tertiary)', marginTop: 4 }}>
