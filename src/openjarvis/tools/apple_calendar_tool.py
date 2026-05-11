@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import sys
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
@@ -247,9 +248,24 @@ def _calendar_db_candidates() -> list[Path]:
 
 
 def _connect_calendar_db(path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    return conn
+    attempts = [
+        f"{path.as_uri()}?mode=ro",
+        f"{path.as_uri()}?mode=ro&immutable=1",
+        f"file:{path}?mode=ro",
+    ]
+    errors: list[str] = []
+    for uri in attempts:
+        try:
+            conn = sqlite3.connect(uri, uri=True)
+            conn.row_factory = sqlite3.Row
+            return conn
+        except sqlite3.Error as exc:
+            errors.append(str(exc))
+
+    detail = "; ".join(dict.fromkeys(errors))
+    raise sqlite3.OperationalError(
+        f"{detail}. Calendar database path: {path}. Backend runtime: {sys.executable}"
+    )
 
 
 def _date_range(
@@ -513,12 +529,19 @@ def _format_range(start_dt: datetime, end_dt: datetime) -> str:
 
 
 def _calendar_error(message: str) -> ToolResult:
+    detail = message.rstrip(" .")
+    permission_hint = (
+        " Check that OpenJarvis and the backend Python runtime listed above "
+        "have Full Disk Access, and that Calendar is synced on this Mac."
+        if "Backend runtime:" in detail
+        else (
+            " Check that OpenJarvis has Full Disk Access and that Calendar is "
+            "synced on this Mac."
+        )
+    )
     return ToolResult(
         tool_name="calendar",
-        content=(
-            f"Cannot inspect Apple Calendar: {message}. Check that OpenJarvis "
-            "has Full Disk Access and that Calendar is synced on this Mac."
-        ),
+        content=f"Cannot inspect Apple Calendar: {detail}.{permission_hint}",
         success=False,
     )
 

@@ -156,3 +156,13 @@ def test_calendar_create_delegates_to_fallback_tool(tmp_path) -> None:
 
     assert result.success
     assert result.content == "created New event"
+
+
+def test_calendar_permission_error_names_backend_runtime(tmp_path) -> None:
+    result = AppleCalendarTool(tmp_path).execute(operation="list", days=1)
+
+    assert not result.success
+    assert "Calendar database path:" in result.content
+    assert "Backend runtime:" in result.content
+    assert "backend Python runtime" in result.content
+    assert "Full Disk Access" in result.content
