@@ -12,6 +12,7 @@ fastapi = pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from openjarvis.connectors.store import KnowledgeStore  # noqa: E402
+from openjarvis.core.types import ToolResult  # noqa: E402
 from openjarvis.server.app import create_app  # noqa: E402
 from openjarvis.server.personal_context import (  # noqa: E402
     build_personal_data_context,
@@ -112,6 +113,32 @@ def test_notes_query_reports_connected_when_no_readable_match(tmp_path: Path) ->
     assert "no readable exact matches" in context
 
 
+def test_calendar_query_includes_local_calendar_context(monkeypatch) -> None:
+    class FakeCalendarTool:
+        def execute(self, **params):
+            assert params["operation"] == "list"
+            assert params["days"] == 7
+            return ToolResult(
+                tool_name="calendar",
+                content="Apple Calendar has 1 event for this week.",
+                success=True,
+            )
+
+    monkeypatch.setattr(
+        "openjarvis.server.personal_context._make_apple_calendar_tool",
+        lambda: FakeCalendarTool(),
+    )
+
+    context = build_personal_data_context(
+        "Can you check my calendar for the week?",
+        None,
+    )
+
+    assert "Apple Calendar local context" in context
+    assert "Apple Calendar has 1 event" in context
+    assert "do not claim you lack access" in context
+
+
 def test_unrelated_query_does_not_inject_context(tmp_path: Path) -> None:
     store = KnowledgeStore(tmp_path / "knowledge.db")
     _store_music_track(store, name="Song A", artist="Artist One", play_count=9)
@@ -154,3 +181,49 @@ def test_chat_route_injects_apple_music_context(tmp_path: Path) -> None:
     assert messages[0].role.value == "system"
     assert "Apple Music library context" in messages[0].content
     assert "Artist One: 9 plays across 1 track" in messages[0].content
+
+
+def test_chat_route_injects_calendar_context(tmp_path: Path, monkeypatch) -> None:
+    class FakeCalendarTool:
+        def execute(self, **params):
+            return ToolResult(
+                tool_name="calendar",
+                content="Apple Calendar has 2 events for this week.",
+                success=True,
+            )
+
+    monkeypatch.setattr(
+        "openjarvis.server.personal_context._make_apple_calendar_tool",
+        lambda: FakeCalendarTool(),
+    )
+
+    store = KnowledgeStore(tmp_path / "knowledge.db")
+    engine = MagicMock()
+    engine.engine_id = "mock"
+    engine.health.return_value = True
+    engine.list_models.return_value = ["test-model"]
+    engine.generate.return_value = {
+        "content": "You have 2 events this week.",
+        "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+        "model": "test-model",
+        "finish_reason": "stop",
+    }
+
+    app = create_app(engine, "test-model", knowledge_store=store)
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "Can you check my calendar for the week?"}
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    messages = engine.generate.call_args.args[0]
+    assert messages[0].role.value == "system"
+    assert "Apple Calendar local context" in messages[0].content
+    assert "Apple Calendar has 2 events" in messages[0].content

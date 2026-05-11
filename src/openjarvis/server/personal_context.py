@@ -48,6 +48,19 @@ _NOTES_TERMS = (
     "notes",
     "notas",
 )
+_CALENDAR_TERMS = (
+    "agenda",
+    "appointment",
+    "appointments",
+    "calendar",
+    "calendario",
+    "calendário",
+    "event",
+    "events",
+    "meeting",
+    "meetings",
+    "schedule",
+)
 _SEARCH_STOPWORDS = {
     "about",
     "and",
@@ -95,30 +108,32 @@ def build_personal_data_context(query: str, store: KnowledgeStore | None) -> str
     This is intentionally conservative: it only injects context for questions
     that clearly target indexed personal sources, so unrelated chats stay clean.
     """
-    if store is None:
-        return ""
-
     query_l = query.lower()
     parts: list[str] = []
 
-    if _looks_like_music_query(query_l):
+    if store is not None and _looks_like_music_query(query_l):
         music_context = _build_apple_music_context(store)
         if music_context:
             parts.append(music_context)
 
-    if _looks_like_notes_query(query_l):
+    if store is not None and _looks_like_notes_query(query_l):
         notes_context = _build_apple_notes_context(query, store)
         if notes_context:
             parts.append(notes_context)
+
+    if _looks_like_calendar_query(query_l):
+        calendar_context = _build_apple_calendar_context(query_l)
+        if calendar_context:
+            parts.append(calendar_context)
 
     if not parts:
         return ""
 
     return (
         "Local indexed personal data is available for this request. Use it when "
-        "answering, and do not claim you lack access to Apple Music or Apple "
-        "Notes when the relevant context below is present. If the context is "
-        "insufficient, say exactly what is missing.\n\n"
+        "answering, and do not claim you lack access to Apple Music, Apple "
+        "Notes, or Apple Calendar when the relevant context below is present. "
+        "If the context is insufficient, say exactly what is missing.\n\n"
         + "\n\n".join(parts)
     )
 
@@ -144,6 +159,59 @@ def _looks_like_music_query(query_l: str) -> bool:
 
 def _looks_like_notes_query(query_l: str) -> bool:
     return any(term in query_l for term in _NOTES_TERMS)
+
+
+def _looks_like_calendar_query(query_l: str) -> bool:
+    has_calendar_term = any(term in query_l for term in _CALENDAR_TERMS)
+    has_personal_term = any(
+        term in query_l
+        for term in (
+            "check",
+            "do i",
+            "my ",
+            "what",
+            "week",
+            "today",
+            "tomorrow",
+            "upcoming",
+        )
+    )
+    return has_calendar_term and has_personal_term
+
+
+def _build_apple_calendar_context(query_l: str) -> str:
+    params: dict[str, Any] = {
+        "operation": "list",
+        "days": 7,
+        "max_results": 12,
+    }
+    if "today" in query_l or "hoje" in query_l:
+        params["date"] = _relative_date(0)
+    elif "tomorrow" in query_l or "amanhã" in query_l or "amanha" in query_l:
+        params["date"] = _relative_date(1)
+    elif "month" in query_l or "30 days" in query_l or "mês" in query_l:
+        params["days"] = 30
+
+    try:
+        result = _make_apple_calendar_tool().execute(**params)
+    except Exception:
+        return ""
+
+    if not result.content:
+        return ""
+    return "Apple Calendar local context:\n" + result.content
+
+
+def _make_apple_calendar_tool():
+    from openjarvis.tools.apple_calendar_tool import AppleCalendarTool
+
+    return AppleCalendarTool()
+
+
+def _relative_date(days: int) -> str:
+    from datetime import datetime, timedelta
+
+    return (datetime.now().astimezone() + timedelta(days=days)).date().isoformat()
 
 
 def _build_apple_music_context(store: KnowledgeStore) -> str:
