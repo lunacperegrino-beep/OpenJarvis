@@ -240,6 +240,68 @@ class TestChatCompletions:
         data = resp.json()
         assert data["choices"][0]["finish_reason"] == "stop"
 
+    def test_complex_request_delegates_to_larger_local_model(self):
+        engine = _make_engine(models=["qwen3.5:4b", "qwen3.5:9b"])
+        app = create_app(engine, "qwen3.5:4b")
+        client = TestClient(app)
+
+        resp = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "qwen3.5:4b",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": (
+                            "Analyze this Python code step-by-step, compare the "
+                            "tradeoffs, then write a detailed implementation plan "
+                            "with risks and generate code patches. def foo(x): "
+                            "return x*x. First review the algorithm. Next propose "
+                            "tests. Additionally explain why each change matters."
+                        ),
+                    }
+                ],
+            },
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["model"] == "qwen3.5:9b"
+        assert data["delegation"]["requested_model"] == "qwen3.5:4b"
+        assert data["delegation"]["selected_model"] == "qwen3.5:9b"
+        assert data["delegation"]["mode"] == "local"
+        assert engine.generate.call_args.kwargs["model"] == "qwen3.5:9b"
+
+    def test_auto_delegation_can_be_disabled(self):
+        engine = _make_engine(models=["qwen3.5:4b", "qwen3.5:9b"])
+        app = create_app(engine, "qwen3.5:4b")
+        client = TestClient(app)
+
+        resp = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "qwen3.5:4b",
+                "auto_delegate": False,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": (
+                            "Analyze this Python code step-by-step, compare the "
+                            "tradeoffs, and write a detailed implementation plan. "
+                            "First review the algorithm. Next propose tests and "
+                            "generate code patches."
+                        ),
+                    }
+                ],
+            },
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["model"] == "qwen3.5:4b"
+        assert data["delegation"] is None
+        assert engine.generate.call_args.kwargs["model"] == "qwen3.5:4b"
+
 
 # ---------------------------------------------------------------------------
 # Models endpoint tests

@@ -18,6 +18,7 @@ export function XRayFooter({ usage, telemetry }: Props) {
   const parts: string[] = [];
   if (telemetry?.engine) parts.push(telemetry.engine);
   if (telemetry?.model_id) parts.push(telemetry.model_id);
+  if (telemetry?.delegated_model_id) parts.push('delegated');
   if (telemetry?.complexity_tier) parts.push(telemetry.complexity_tier);
   if (telemetry?.total_ms) parts.push(formatMs(telemetry.total_ms));
   if (usage && (usage.prompt_tokens || usage.completion_tokens)) {
@@ -35,6 +36,15 @@ export function XRayFooter({ usage, telemetry }: Props) {
   if (telemetry?.engine) {
     const modelDetail = telemetry.model_id || '';
     rows.push({ label: 'Engine', value: `${telemetry.engine}${modelDetail ? ` (${modelDetail})` : ''}` });
+  }
+  if (telemetry?.delegated_model_id) {
+    rows.push({
+      label: 'Delegation',
+      value: `${telemetry.requested_model_id || 'default'} -> ${telemetry.delegated_model_id}`,
+    });
+    if (telemetry.delegation_reason) {
+      rows.push({ label: 'Reason', value: telemetry.delegation_reason });
+    }
   }
   if (usage) {
     const tokenParts = [`${usage.completion_tokens} generated`, `${usage.prompt_tokens} prompt`];

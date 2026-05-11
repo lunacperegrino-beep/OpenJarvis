@@ -93,7 +93,11 @@ def _successful_image_result(tool_results: list[Any]) -> dict[str, str] | None:
         if isinstance(url, str) and url:
             return {"kind": "url", "value": url, "provider": str(provider or "")}
         if content:
-            return {"kind": "text", "value": str(content), "provider": str(provider or "")}
+            return {
+                "kind": "text",
+                "value": str(content),
+                "provider": str(provider or ""),
+            }
     return None
 
 
@@ -141,11 +145,16 @@ class AgentStreamBridge:
         bus: EventBus,
         model: str,
         request: ChatCompletionRequest,
+        *,
+        complexity_info: Any = None,
+        delegation_info: Any = None,
     ) -> None:
         self._agent = agent
         self._bus = bus
         self._model = model
         self._request = request
+        self._complexity_info = complexity_info
+        self._delegation_info = delegation_info
         self._chunk_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
         self._queue: asyncio.Queue = asyncio.Queue()
         self._callbacks: dict[EventType, object] = {}
@@ -372,6 +381,10 @@ class AgentStreamBridge:
                 completion_tokens=completion_tokens,
                 total_tokens=total_tokens,
             ).model_dump()
+            if self._complexity_info is not None:
+                final_data["complexity"] = self._complexity_info.model_dump()
+            if self._delegation_info is not None:
+                final_data["delegation"] = self._delegation_info.model_dump()
             yield f"data: {json.dumps(final_data)}\n\n"
 
             yield "data: [DONE]\n\n"
@@ -390,9 +403,19 @@ async def create_agent_stream(
     bus: EventBus,
     model: str,
     request: ChatCompletionRequest,
+    *,
+    complexity_info: Any = None,
+    delegation_info: Any = None,
 ) -> StreamingResponse:
     """Create an AgentStreamBridge and return a FastAPI StreamingResponse."""
-    bridge = AgentStreamBridge(agent, bus, model, request)
+    bridge = AgentStreamBridge(
+        agent,
+        bus,
+        model,
+        request,
+        complexity_info=complexity_info,
+        delegation_info=delegation_info,
+    )
     return StreamingResponse(
         bridge.stream(),
         media_type="text/event-stream",

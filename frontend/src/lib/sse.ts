@@ -8,6 +8,8 @@ export interface ChatRequest {
   temperature?: number;
   max_tokens?: number;
   no_memory?: boolean;
+  auto_delegate?: boolean;
+  allow_cloud_delegation?: boolean;
 }
 
 export async function* streamChat(

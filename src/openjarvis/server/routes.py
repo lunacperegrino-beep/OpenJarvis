@@ -20,6 +20,7 @@ from openjarvis.server.models import (
     Choice,
     ChoiceMessage,
     ComplexityInfo,
+    DelegationInfo,
     DeltaMessage,
     ModelListResponse,
     ModelObject,
@@ -150,6 +151,7 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
 
     # Run complexity analysis on the last user message
     complexity_info = None
+    delegation_info = None
     query_text_for_complexity = ""
     for m in reversed(request_body.messages):
         if m.role == "user" and m.content:
@@ -176,6 +178,23 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
             # the client requested — never reduce below the request value.
             if suggested > request_body.max_tokens:
                 request_body.max_tokens = suggested
+
+            delegation_info = _select_request_model(
+                engine,
+                model,
+                complexity_info,
+                auto_delegate=request_body.auto_delegate,
+                allow_cloud_delegation=request_body.allow_cloud_delegation,
+            )
+            if delegation_info is not None:
+                model = delegation_info.selected_model
+                selected_suggested = adjust_tokens_for_model(
+                    cr.suggested_max_tokens,
+                    model,
+                )
+                complexity_info.suggested_max_tokens = selected_suggested
+                if selected_suggested > request_body.max_tokens:
+                    request_body.max_tokens = selected_suggested
         except Exception:
             logging.getLogger("openjarvis.server").debug(
                 "Complexity analysis failed",
@@ -189,12 +208,31 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
         # desktop app.  The bridge word-splits the result rather than streaming
         # true tokens, but that is acceptable for an agentic response.
         if agent is not None and bus is not None:
-            return await _handle_agent_stream(agent, bus, model, request_body)
-        return await _handle_stream(engine, model, request_body, complexity_info)
+            return await _handle_agent_stream(
+                agent,
+                bus,
+                model,
+                request_body,
+                complexity_info=complexity_info,
+                delegation_info=delegation_info,
+            )
+        return await _handle_stream(
+            engine,
+            model,
+            request_body,
+            complexity_info,
+            delegation_info=delegation_info,
+        )
 
     # Non-streaming: use agent if available, otherwise direct engine call
     if agent is not None:
-        return _handle_agent(agent, model, request_body, complexity_info)
+        return _handle_agent(
+            agent,
+            model,
+            request_body,
+            complexity_info,
+            delegation_info=delegation_info,
+        )
 
     bus = getattr(request.app.state, "bus", None)
     return _handle_direct(
@@ -203,6 +241,31 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
         request_body,
         bus=bus,
         complexity_info=complexity_info,
+        delegation_info=delegation_info,
+    )
+
+
+def _select_request_model(
+    engine,
+    requested_model: str,
+    complexity_info: ComplexityInfo | None,
+    *,
+    auto_delegate: bool,
+    allow_cloud_delegation: bool,
+) -> DelegationInfo | None:
+    try:
+        available_models = engine.list_models()
+    except Exception:
+        available_models = []
+
+    from openjarvis.server.model_delegation import select_delegated_model
+
+    return select_delegated_model(
+        requested_model,
+        available_models,
+        complexity_info,
+        auto_delegate=auto_delegate,
+        allow_cloud_delegation=allow_cloud_delegation,
     )
 
 
@@ -212,6 +275,7 @@ def _handle_direct(
     req: ChatCompletionRequest,
     bus=None,
     complexity_info=None,
+    delegation_info=None,
 ) -> ChatCompletionResponse:
     """Direct engine call without agent."""
     messages = _to_messages(req.messages)
@@ -271,6 +335,7 @@ def _handle_direct(
             total_tokens=usage.get("total_tokens", 0),
         ),
         complexity=complexity_info,
+        delegation=delegation_info,
     )
 
 
@@ -279,6 +344,7 @@ def _handle_agent(
     model: str,
     req: ChatCompletionRequest,
     complexity_info=None,
+    delegation_info=None,
 ) -> ChatCompletionResponse:
     """Run through agent."""
     from openjarvis.agents._stubs import AgentContext
@@ -345,14 +411,30 @@ def _handle_agent(
         ],
         usage=usage,
         complexity=complexity_info,
+        delegation=delegation_info,
     )
 
 
-async def _handle_agent_stream(agent, bus, model, req):
+async def _handle_agent_stream(
+    agent,
+    bus,
+    model,
+    req,
+    *,
+    complexity_info=None,
+    delegation_info=None,
+):
     """Stream agent response with EventBus events via SSE."""
     from openjarvis.server.stream_bridge import create_agent_stream
 
-    return await create_agent_stream(agent, bus, model, req)
+    return await create_agent_stream(
+        agent,
+        bus,
+        model,
+        req,
+        complexity_info=complexity_info,
+        delegation_info=delegation_info,
+    )
 
 
 async def _handle_stream(
@@ -360,6 +442,7 @@ async def _handle_stream(
     model: str,
     req: ChatCompletionRequest,
     complexity_info=None,
+    delegation_info=None,
 ):
     """Stream response using SSE format."""
     from openjarvis.server.cloud_router import (
@@ -487,6 +570,8 @@ async def _handle_stream(
 
         if complexity_info is not None:
             finish_dict["complexity"] = complexity_info.model_dump()
+        if delegation_info is not None:
+            finish_dict["delegation"] = delegation_info.model_dump()
 
         yield f"data: {_json.dumps(finish_dict)}\n\n"
         yield "data: [DONE]\n\n"

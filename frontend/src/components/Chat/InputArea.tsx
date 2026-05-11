@@ -28,6 +28,8 @@ interface AdvancedOptions {
   systemPrompt: string;
   noContext: boolean;
   jsonMode: boolean;
+  autoDelegate: boolean;
+  allowCloudDelegation: boolean;
 }
 
 const DEFAULT_ADVANCED_OPTIONS: AdvancedOptions = {
@@ -37,6 +39,8 @@ const DEFAULT_ADVANCED_OPTIONS: AdvancedOptions = {
   systemPrompt: '',
   noContext: false,
   jsonMode: false,
+  autoDelegate: true,
+  allowCloudDelegation: false,
 };
 
 const CLOUD_MODEL_PRESETS = [
@@ -497,6 +501,14 @@ export function InputArea() {
     let accumulatedContent = '';
     let usage: TokenUsage | undefined;
     let complexity: { score: number; tier: string; suggested_max_tokens: number } | undefined;
+    let delegation:
+      | {
+          requested_model: string;
+          selected_model: string;
+          mode: string;
+          reason: string;
+        }
+      | undefined;
     const toolCalls: ToolCallInfo[] = [];
     let lastFlush = 0;
     let ttftMs: number | undefined;
@@ -524,6 +536,8 @@ export function InputArea() {
           temperature: effectiveTemperature,
           max_tokens: effectiveMaxTokens,
           no_memory: advancedOptions.noContext,
+          auto_delegate: advancedOptions.autoDelegate,
+          allow_cloud_delegation: advancedOptions.allowCloudDelegation,
         },
         controller.signal,
       )) {
@@ -581,6 +595,7 @@ export function InputArea() {
             const delta = data.choices?.[0]?.delta;
             if (data.usage) usage = data.usage;
             if (data.complexity) complexity = data.complexity;
+            if (data.delegation) delegation = data.delegation;
             if (delta?.content) {
               if (!ttftMs) ttftMs = Date.now() - startTime;
               accumulatedContent += delta.content;
@@ -619,10 +634,15 @@ export function InputArea() {
       }
       const totalMs = Date.now() - startTime;
       const _CLOUD_PREFIXES = ['gpt-', 'o1-', 'o3-', 'o4-', 'claude-', 'gemini-', 'openrouter/', 'MiniMax-', 'chatgpt-'];
-      const engineLabel = _CLOUD_PREFIXES.some(p => effectiveModel.startsWith(p)) ? 'cloud' : 'ollama';
+      const actualModel = delegation?.selected_model || effectiveModel;
+      const engineLabel = _CLOUD_PREFIXES.some(p => actualModel.startsWith(p)) ? 'cloud' : 'ollama';
       const telemetry: MessageTelemetry = {
         engine: engineLabel,
-        model_id: effectiveModel,
+        model_id: actualModel,
+        requested_model_id: delegation?.requested_model,
+        delegated_model_id: delegation?.selected_model,
+        delegation_mode: delegation?.mode,
+        delegation_reason: delegation?.reason,
         total_ms: totalMs,
         ttft_ms: ttftMs,
         tokens_per_sec: usage?.completion_tokens
@@ -632,6 +652,14 @@ export function InputArea() {
         complexity_tier: complexity?.tier,
         suggested_max_tokens: complexity?.suggested_max_tokens,
       };
+      if (delegation) {
+        useAppStore.getState().addLogEntry({
+          timestamp: Date.now(),
+          level: 'info',
+          category: 'model',
+          message: `Auto delegated ${delegation.requested_model} → ${delegation.selected_model}`,
+        });
+      }
       // Check if the response has digest audio available
       let audioMeta: { url: string } | undefined;
       try {
@@ -1096,6 +1124,16 @@ function AdvancedOptionsPanel({
 
       <div className="mt-2 flex flex-wrap gap-2">
         <AdvancedToggle
+          label="Auto delegate"
+          active={options.autoDelegate}
+          onClick={() => onChange('autoDelegate', !options.autoDelegate)}
+        />
+        <AdvancedToggle
+          label="Allow cloud"
+          active={options.allowCloudDelegation}
+          onClick={() => onChange('allowCloudDelegation', !options.allowCloudDelegation)}
+        />
+        <AdvancedToggle
           label="No context"
           active={options.noContext}
           onClick={() => onChange('noContext', !options.noContext)}
@@ -1223,6 +1261,8 @@ function isAdvancedOptionsActive(options: AdvancedOptions): boolean {
       options.temperature.trim() ||
       options.maxTokens.trim() ||
       options.systemPrompt.trim() ||
+      options.autoDelegate !== DEFAULT_ADVANCED_OPTIONS.autoDelegate ||
+      options.allowCloudDelegation !== DEFAULT_ADVANCED_OPTIONS.allowCloudDelegation ||
       options.noContext ||
       options.jsonMode,
   );

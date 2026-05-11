@@ -31,6 +31,8 @@ class TestChatCompletionRequest:
         assert len(req.messages) == 1
         assert req.temperature == 0.7
         assert req.stream is False
+        assert req.auto_delegate is True
+        assert req.allow_cloud_delegation is False
 
     def test_with_options(self):
         req = ChatCompletionRequest(
@@ -39,10 +41,14 @@ class TestChatCompletionRequest:
             temperature=0.1,
             max_tokens=256,
             stream=True,
+            auto_delegate=False,
+            allow_cloud_delegation=True,
         )
         assert req.temperature == 0.1
         assert req.max_tokens == 256
         assert req.stream is True
+        assert req.auto_delegate is False
+        assert req.allow_cloud_delegation is True
 
 
 class TestChatCompletionResponse:

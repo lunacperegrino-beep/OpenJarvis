@@ -29,6 +29,8 @@ class ChatCompletionRequest(BaseModel):
     stream: bool = False
     tools: Optional[List[Dict[str, Any]]] = None
     no_memory: bool = False
+    auto_delegate: bool = True
+    allow_cloud_delegation: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -65,6 +67,13 @@ class ComplexityInfo(BaseModel):
     suggested_max_tokens: int
 
 
+class DelegationInfo(BaseModel):
+    requested_model: str
+    selected_model: str
+    mode: str
+    reason: str
+
+
 class ChatCompletionResponse(BaseModel):
     id: str = Field(default_factory=lambda: f"chatcmpl-{uuid.uuid4().hex[:12]}")
     object: str = "chat.completion"
@@ -73,6 +82,7 @@ class ChatCompletionResponse(BaseModel):
     choices: List[Choice] = Field(default_factory=list)
     usage: UsageInfo = Field(default_factory=UsageInfo)
     complexity: Optional[ComplexityInfo] = None
+    delegation: Optional[DelegationInfo] = None
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +134,7 @@ __all__ = [
     "Choice",
     "ChoiceMessage",
     "ComplexityInfo",
+    "DelegationInfo",
     "DeltaMessage",
     "ModelListResponse",
     "ModelObject",

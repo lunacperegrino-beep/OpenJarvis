@@ -56,6 +56,10 @@ export interface TokenUsage {
 export interface MessageTelemetry {
   engine?: string;
   model_id?: string;
+  requested_model_id?: string;
+  delegated_model_id?: string;
+  delegation_mode?: string;
+  delegation_reason?: string;
   tokens_per_sec?: number;
   ttft_ms?: number;
   total_ms?: number;
