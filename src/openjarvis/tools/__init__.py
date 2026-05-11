@@ -142,6 +142,11 @@ except ImportError:
     pass
 
 try:
+    import openjarvis.tools.apple_calendar_tool  # noqa: F401
+except ImportError:
+    pass
+
+try:
     import openjarvis.tools.knowledge_tools  # noqa: F401
 except ImportError:
     pass
