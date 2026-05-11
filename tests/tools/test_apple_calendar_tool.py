@@ -158,11 +158,26 @@ def test_calendar_create_delegates_to_fallback_tool(tmp_path) -> None:
     assert result.content == "created New event"
 
 
-def test_calendar_permission_error_names_backend_runtime(tmp_path) -> None:
+def test_calendar_permission_error_names_backend_runtime(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    runtime_target = tmp_path / "python3.13"
+    runtime_link = tmp_path / "python3"
+    runtime_target.touch()
+    runtime_link.symlink_to(runtime_target)
+    monkeypatch.setattr(
+        "openjarvis.tools.apple_calendar_tool.sys.executable",
+        str(runtime_link),
+    )
+
     result = AppleCalendarTool(tmp_path).execute(operation="list", days=1)
 
     assert not result.success
     assert "Calendar database path:" in result.content
     assert "Backend runtime:" in result.content
+    assert "Resolved backend runtime:" in result.content
     assert "backend Python runtime" in result.content
+    assert "This is a permission error, not an empty calendar" in result.content
+    assert "System Settings > Privacy & Security > Full Disk Access" in result.content
     assert "Full Disk Access" in result.content

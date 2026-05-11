@@ -264,8 +264,19 @@ def _connect_calendar_db(path: Path) -> sqlite3.Connection:
 
     detail = "; ".join(dict.fromkeys(errors))
     raise sqlite3.OperationalError(
-        f"{detail}. Calendar database path: {path}. Backend runtime: {sys.executable}"
+        f"{detail}. Calendar database path: {path}. {_runtime_access_details()}"
     )
+
+
+def _runtime_access_details() -> str:
+    runtime = Path(sys.executable).expanduser()
+    resolved = runtime.resolve(strict=False)
+    if resolved != runtime:
+        return (
+            f"Backend runtime: {runtime}. "
+            f"Resolved backend runtime: {resolved}"
+        )
+    return f"Backend runtime: {runtime}"
 
 
 def _date_range(
@@ -531,8 +542,11 @@ def _format_range(start_dt: datetime, end_dt: datetime) -> str:
 def _calendar_error(message: str) -> ToolResult:
     detail = message.rstrip(" .")
     permission_hint = (
-        " Check that OpenJarvis and the backend Python runtime listed above "
-        "have Full Disk Access, and that Calendar is synced on this Mac."
+        " This is a permission error, not an empty calendar. Full Disk Access "
+        "setup: System Settings > Privacy & Security > Full Disk Access. "
+        "Enable OpenJarvis.app and the backend Python runtime path shown "
+        "above. If macOS follows the symlink, add or enable the resolved "
+        "backend runtime path shown above. Then quit and reopen OpenJarvis."
         if "Backend runtime:" in detail
         else (
             " Check that OpenJarvis has Full Disk Access and that Calendar is "
