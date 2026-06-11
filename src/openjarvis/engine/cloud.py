@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from collections.abc import AsyncIterator, Sequence
@@ -18,6 +19,8 @@ from openjarvis.engine._base import (
     messages_to_dicts,
 )
 from openjarvis.engine._stubs import StreamChunk
+
+logger = logging.getLogger(__name__)
 
 # Pricing per million tokens (input, output)
 PRICING: Dict[str, tuple[float, float]] = {
@@ -133,6 +136,25 @@ def _is_openai_reasoning_model(model: str) -> bool:
     return m == "gpt-5-mini" or m.startswith("gpt-5-mini-")
 
 
+def _is_unsupported_temperature_error(exc: Exception) -> bool:
+    """True if an OpenAI 400 says the model rejects a non-default temperature.
+
+    Some models (e.g. gpt-5) only accept the default temperature and return
+    ``code: unsupported_value`` for ``param: temperature`` (see #426). We
+    can't enumerate every such model up front, so detect the error and retry
+    without temperature — mirroring the tools-400 retry in the local engines.
+    """
+    message = str(exc).lower()
+    if "temperature" not in message:
+        return False
+    return (
+        "unsupported_value" in message
+        or "unsupported value" in message
+        or "only the default" in message
+        or "does not support" in message
+    )
+
+
 def estimate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
     """Estimate USD cost based on the hardcoded pricing table."""
     # Try exact match first, then prefix match
@@ -147,6 +169,43 @@ def estimate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> flo
     input_cost = (prompt_tokens / 1_000_000) * prices[0]
     output_cost = (completion_tokens / 1_000_000) * prices[1]
     return input_cost + output_cost
+
+
+def _serialize_anthropic_block(block: Any) -> Dict[str, Any]:
+    """Turn an Anthropic content block into a JSON-safe dict for tracing.
+
+    Handles every block type Anthropic returns today (text, tool_use,
+    server_tool_use, web_search_tool_result, tool_result, thinking). Nested
+    content (e.g. ``web_search_tool_result.content`` is itself a list of
+    citation/result blocks) recurses so the trace has the full payload, not
+    a truncated summary.
+    """
+    out: Dict[str, Any] = {
+        "type": getattr(block, "type", None) or type(block).__name__,
+    }
+    for attr in (
+        "id",
+        "name",
+        "input",
+        "text",
+        "thinking",
+        "signature",
+        "tool_use_id",
+        "content",
+    ):
+        if not hasattr(block, attr):
+            continue
+        val = getattr(block, attr)
+        if attr == "content" and isinstance(val, list):
+            out[attr] = [_serialize_anthropic_block(b) for b in val]
+        elif hasattr(val, "model_dump"):
+            try:
+                out[attr] = val.model_dump()
+            except Exception:
+                out[attr] = str(val)
+        else:
+            out[attr] = val
+    return out
 
 
 def _annotate_anthropic_cache(messages: list[dict]) -> list[dict]:
@@ -487,7 +546,19 @@ class CloudEngine(InferenceEngine):
                 create_kwargs["response_format"] = response_format
 
         t0 = time.monotonic()
-        resp = self._openai_client.chat.completions.create(**create_kwargs)
+        try:
+            resp = self._openai_client.chat.completions.create(**create_kwargs)
+        except Exception as exc:
+            # Some models reject a non-default temperature with a 400
+            # unsupported_value (see #426). Retry once without it rather
+            # than failing the user's first prompt.
+            if "temperature" in create_kwargs and _is_unsupported_temperature_error(
+                exc
+            ):
+                create_kwargs.pop("temperature", None)
+                resp = self._openai_client.chat.completions.create(**create_kwargs)
+            else:
+                raise
         elapsed = time.monotonic() - t0
         choice = resp.choices[0]
         usage = resp.usage
@@ -573,20 +644,48 @@ class CloudEngine(InferenceEngine):
         resp = self._anthropic_client.messages.create(**create_kwargs)
         elapsed = time.monotonic() - t0
 
-        # Extract text and tool_use blocks from response content
+        # Walk every block in resp.content. Anthropic returns several kinds:
+        #   - text                       (plain assistant text)
+        #   - tool_use                   (model wants the caller to run a tool)
+        #   - server_tool_use            (model invoked a server-side tool,
+        #                                 e.g. web_search; carries the actual
+        #                                 query the model issued)
+        #   - web_search_tool_result     (server-tool result body)
+        #   - tool_result                (caller-side tool result echo)
+        #   - thinking                   (Opus reasoning trace)
+        # ``content_blocks`` keeps the full serialized list for trace
+        # observability. ``tool_calls`` is the narrow caller-executable
+        # surface — only ``tool_use`` blocks (server_tool_use lives in
+        # content_blocks since Anthropic already ran it server-side).
+        # ``tool_results`` aggregates both result kinds.
         content_parts: list[str] = []
         tool_calls: list[Dict[str, Any]] = []
+        tool_results: list[Dict[str, Any]] = []
+        content_blocks: list[Dict[str, Any]] = []
         for block in resp.content:
-            if getattr(block, "type", None) == "tool_use":
+            btype = getattr(block, "type", None) or type(block).__name__
+            serialized = _serialize_anthropic_block(block)
+            content_blocks.append(serialized)
+            if btype == "tool_use":
+                block_id = getattr(block, "id", None)
+                if not block_id:
+                    logger.warning(
+                        "Anthropic tool_use block without an id; skipping. "
+                        "Round-trip into the next assistant turn would fail "
+                        "Anthropic's tool_use_id matching."
+                    )
+                    continue
                 tool_calls.append(
                     {
-                        "id": block.id,
-                        "name": block.name,
-                        "arguments": json.dumps(block.input)
-                        if isinstance(block.input, dict)
-                        else str(block.input),
+                        "id": block_id,
+                        "name": getattr(block, "name", ""),
+                        "arguments": json.dumps(getattr(block, "input", None))
+                        if isinstance(getattr(block, "input", None), dict)
+                        else str(getattr(block, "input", "")),
                     }
                 )
+            elif btype in ("web_search_tool_result", "tool_result"):
+                tool_results.append(serialized)
             elif hasattr(block, "text"):
                 content_parts.append(block.text)
 
@@ -605,10 +704,13 @@ class CloudEngine(InferenceEngine):
             "finish_reason": resp.stop_reason or "stop",
             "cost_usd": estimate_cost(model, prompt_tokens, completion_tokens),
             "ttft": elapsed,
+            "content_blocks": content_blocks,
         }
 
         if tool_calls:
             result["tool_calls"] = tool_calls
+        if tool_results:
+            result["tool_results"] = tool_results
 
         return result
 
@@ -791,6 +893,13 @@ class CloudEngine(InferenceEngine):
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
+        # Forward tools / tool_choice (OpenRouter is OpenAI-compatible).
+        tools = kwargs.pop("tools", None)
+        if tools:
+            create_kwargs["tools"] = tools
+        tool_choice = kwargs.pop("tool_choice", None)
+        if tool_choice is not None:
+            create_kwargs["tool_choice"] = tool_choice
         t0 = time.monotonic()
         resp = self._openrouter_client.chat.completions.create(**create_kwargs)
         elapsed = time.monotonic() - t0
@@ -798,7 +907,7 @@ class CloudEngine(InferenceEngine):
         usage = resp.usage
         prompt_tokens = usage.prompt_tokens if usage else 0
         completion_tokens = usage.completion_tokens if usage else 0
-        return {
+        result: Dict[str, Any] = {
             "content": choice.message.content or "",
             "usage": {
                 "prompt_tokens": prompt_tokens,
@@ -809,6 +918,19 @@ class CloudEngine(InferenceEngine):
             "finish_reason": choice.finish_reason or "stop",
             "ttft": elapsed,
         }
+        if getattr(choice.message, "tool_calls", None):
+            result["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": tc.type,
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    },
+                }
+                for tc in choice.message.tool_calls
+            ]
+        return result
 
     def _generate_minimax(
         self,
@@ -1093,6 +1215,13 @@ class CloudEngine(InferenceEngine):
             "temperature": temperature,
             "stream": True,
         }
+        # Forward tools / tool_choice (OpenRouter is OpenAI-compatible).
+        tools = kwargs.pop("tools", None)
+        if tools:
+            create_kwargs["tools"] = tools
+        tool_choice = kwargs.pop("tool_choice", None)
+        if tool_choice is not None:
+            create_kwargs["tool_choice"] = tool_choice
         resp = self._openrouter_client.chat.completions.create(**create_kwargs)
         for chunk in resp:
             delta = chunk.choices[0].delta if chunk.choices else None
@@ -1281,6 +1410,31 @@ class CloudEngine(InferenceEngine):
                     finish = "tool_calls" if stop_reason == "tool_use" else "stop"
                     yield StreamChunk(finish_reason=finish)
 
+            # End-of-stream parity with ``_generate_anthropic``: emit
+            # ``content_blocks`` (every block kind, including server_tool_use
+            # and thinking) and ``tool_results`` (web_search_tool_result +
+            # tool_result) so streaming traces see what non-streaming traces
+            # see.
+            try:
+                final_msg = stream.get_final_message()
+            except Exception as exc:  # noqa: BLE001 — SDK shape varies
+                logger.debug("Anthropic stream.get_final_message() failed: %s", exc)
+                final_msg = None
+            if final_msg is not None and getattr(final_msg, "content", None):
+                content_blocks: list[Dict[str, Any]] = []
+                tool_results: list[Dict[str, Any]] = []
+                for block in final_msg.content:
+                    btype = getattr(block, "type", None) or type(block).__name__
+                    serialized = _serialize_anthropic_block(block)
+                    content_blocks.append(serialized)
+                    if btype in ("web_search_tool_result", "tool_result"):
+                        tool_results.append(serialized)
+                if content_blocks or tool_results:
+                    yield StreamChunk(
+                        content_blocks=content_blocks or None,
+                        tool_results=tool_results or None,
+                    )
+
     async def stream_full(
         self,
         messages: Sequence[Message],
@@ -1322,6 +1476,34 @@ class CloudEngine(InferenceEngine):
         if self._codex_client is not None:
             models.extend(_CODEX_MODELS)
         return models
+
+    def _client_for_model(self, model: str) -> Any:
+        """Return the provider client ``generate``/``stream`` will dispatch to
+        for *model* (mirrors the routing in those methods)."""
+        if _is_codex_model(model):
+            return self._codex_client
+        if _is_openrouter_model(model):
+            return self._openrouter_client
+        if _is_minimax_model(model):
+            return self._minimax_client
+        if _is_anthropic_model(model):
+            return self._anthropic_client
+        if _is_google_model(model):
+            return self._google_client
+        return self._openai_client
+
+    def can_serve(self, model: str) -> bool:
+        """Return ``True`` only if the provider client for *model* exists.
+
+        ``health()`` is ``True`` whenever *any* provider client is configured,
+        but a request for, say, a ``gpt-*`` model still needs the OpenAI
+        client specifically. Without this check the cloud engine gets picked
+        as a fallback (when the local engine is down) for a model it can't
+        serve, then dies at call time with "<provider> client not available"
+        instead of the user getting a helpful "start your local engine"
+        message (see #532).
+        """
+        return self._client_for_model(model) is not None
 
     def health(self) -> bool:
         return (

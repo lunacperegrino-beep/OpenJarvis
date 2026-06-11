@@ -1,6 +1,6 @@
 [package]
 name = "openjarvis-desktop"
-version = "0.1.0"
+version = "1.0.1"
 description = "OpenJarvis Desktop — Native AI assistant with energy monitoring, trace debugging, and learning visualization"
 edition = "2021"
 license = "MIT"
@@ -10,6 +10,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 base64 = "0.22"
+toml_edit = "0.22"
 tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
 tauri-plugin-notification = "2"
 tauri-plugin-shell = "2"

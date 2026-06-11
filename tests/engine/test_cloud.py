@@ -114,6 +114,97 @@ class TestCloudEngineGenerate:
         assert result["usage"]["completion_tokens"] == 8
 
 
+class TestOpenAIUnsupportedTemperatureRetry:
+    """Regression for #426.
+
+    Some OpenAI models (e.g. gpt-5) reject a non-default ``temperature``
+    with HTTP 400 ``unsupported_value``. A brand-new install defaults to
+    such a model, so the very first prompt 400s. The engine must detect
+    this specific error and retry once without ``temperature``.
+    """
+
+    def _fake_resp(self):
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="ok"),
+                    finish_reason="stop",
+                )
+            ],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            model="gpt-5",
+        )
+
+    def test_retries_without_temperature_on_unsupported_value(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+        calls: list[dict] = []
+        err = Exception(
+            "Error code: 400 - {'error': {'message': \"Unsupported value: "
+            "'temperature' does not support 0.7 with this model. Only the "
+            "default (1) value is supported.\", 'type': "
+            "'invalid_request_error', 'param': 'temperature', 'code': "
+            "'unsupported_value'}}"
+        )
+
+        def create(**kwargs):
+            calls.append(kwargs)
+            if "temperature" in kwargs:
+                raise err
+            return self._fake_resp()
+
+        fake_client = mock.MagicMock()
+        fake_client.chat.completions.create.side_effect = create
+
+        EngineRegistry.register_value("cloud", CloudEngine)
+        engine = CloudEngine()
+        engine._openai_client = fake_client
+
+        result = engine.generate(
+            [Message(role=Role.USER, content="Hi")],
+            model="gpt-5",
+            temperature=0.7,
+        )
+        # The call succeeded via the retry.
+        assert result["content"] == "ok"
+        # First attempt sent temperature, retry dropped it.
+        assert len(calls) == 2
+        assert "temperature" in calls[0]
+        assert "temperature" not in calls[1]
+
+    def test_unrelated_400_is_not_retried(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+        calls: list[dict] = []
+        err = Exception("Error code: 400 - context_length_exceeded")
+
+        def create(**kwargs):
+            calls.append(kwargs)
+            raise err
+
+        fake_client = mock.MagicMock()
+        fake_client.chat.completions.create.side_effect = create
+
+        EngineRegistry.register_value("cloud", CloudEngine)
+        engine = CloudEngine()
+        engine._openai_client = fake_client
+
+        with pytest.raises(Exception):  # noqa: B017 - re-raised unchanged
+            engine.generate(
+                [Message(role=Role.USER, content="Hi")],
+                model="gpt-4o",
+                temperature=0.7,
+            )
+        # No temperature-retry for an unrelated 400 — exactly one attempt.
+        assert len(calls) == 1
+
+
 # ---------------------------------------------------------------------------
 # Codex provider support (OpenAI Responses API)
 # ---------------------------------------------------------------------------
@@ -290,3 +381,95 @@ class TestCodexGenerate:
         engine._codex_client = {"token": "t", "url": "http://test"}
         engine.close()
         assert engine._codex_client is None
+
+
+class TestOpenRouterToolForwarding:
+    """Regression for #511: the OpenRouter engine must forward tools/tool_choice
+    to the (OpenAI-compatible) API and parse tool_calls back out of the response.
+    Pre-fix, both were dropped, silently breaking function-calling via OpenRouter.
+    """
+
+    def test_generate_forwards_tools_and_parses_tool_calls(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+        fake_tc = SimpleNamespace(
+            id="call_1",
+            type="function",
+            function=SimpleNamespace(name="get_weather", arguments='{"city": "NYC"}'),
+        )
+        fake_choice = SimpleNamespace(
+            message=SimpleNamespace(content=None, tool_calls=[fake_tc]),
+            finish_reason="tool_calls",
+        )
+        fake_resp = SimpleNamespace(
+            choices=[fake_choice],
+            usage=SimpleNamespace(prompt_tokens=3, completion_tokens=2, total_tokens=5),
+            model="openai/gpt-4o",
+        )
+        fake_client = mock.MagicMock()
+        fake_client.chat.completions.create.return_value = fake_resp
+
+        EngineRegistry.register_value("cloud", CloudEngine)
+        engine = CloudEngine()
+        engine._openrouter_client = fake_client
+
+        tools = [
+            {
+                "type": "function",
+                "function": {"name": "get_weather", "parameters": {}},
+            }
+        ]
+        result = engine.generate(
+            [Message(role=Role.USER, content="weather in NYC?")],
+            model="openrouter/openai/gpt-4o",
+            tools=tools,
+            tool_choice="auto",
+        )
+
+        # tools / tool_choice are forwarded to the API call
+        sent = fake_client.chat.completions.create.call_args.kwargs
+        assert sent["tools"] == tools
+        assert sent["tool_choice"] == "auto"
+
+        # tool_calls from the response are parsed back into the result
+        assert result["tool_calls"][0]["id"] == "call_1"
+        assert result["tool_calls"][0]["function"]["name"] == "get_weather"
+        assert result["tool_calls"][0]["function"]["arguments"] == '{"city": "NYC"}'
+
+
+class TestCloudEngineCanServe:
+    """#532: can_serve gates on the per-provider client, not just health().
+
+    health() is True whenever *any* provider client is configured, but a
+    request for a gpt-* model still needs the OpenAI client specifically — so
+    engine selection must not pick the cloud engine for a model whose provider
+    client is missing.
+    """
+
+    @staticmethod
+    def _engine(**clients: object) -> CloudEngine:
+        eng = CloudEngine.__new__(CloudEngine)  # bypass real client init
+        for name in (
+            "_openai_client",
+            "_anthropic_client",
+            "_google_client",
+            "_openrouter_client",
+            "_minimax_client",
+            "_codex_client",
+        ):
+            setattr(eng, name, clients.get(name))
+        return eng
+
+    def test_openai_only_serves_openai_models(self) -> None:
+        eng = self._engine(_openai_client=object())
+        assert eng.can_serve("gpt-4o") is True
+        assert eng.can_serve("claude-sonnet-4") is False
+        assert eng.can_serve("gemini-2.5-pro") is False
+        assert eng.can_serve("openrouter/openai/gpt-4o") is False
+
+    def test_anthropic_only_serves_anthropic_models(self) -> None:
+        eng = self._engine(_anthropic_client=object())
+        assert eng.can_serve("claude-sonnet-4") is True
+        assert eng.can_serve("gpt-4o") is False

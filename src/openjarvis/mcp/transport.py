@@ -89,11 +89,17 @@ class StdioTransport(MCPTransport):
         return MCPResponse.from_json(response_line.strip())
 
     def send_notification(self, request: MCPRequest) -> None:
-        """Write notification without waiting for a response."""
+        """Send a JSON-RPC notification — write only, never read.
+
+        Overrides the base implementation: stdio servers do not reply
+        to notifications, so the default ``send()`` would block forever
+        on ``proc.stdout.readline()``.
+        """
         proc = self._process
         if proc is None or proc.stdin is None:
             raise RuntimeError("Transport process is not running")
-        proc.stdin.write(request.to_json() + "\n")
+        line = request.to_json() + "\n"
+        proc.stdin.write(line)
         proc.stdin.flush()
 
     def close(self) -> None:
@@ -116,12 +122,14 @@ class StreamableHTTPTransport(MCPTransport):
         self,
         url: str,
         *,
+        token: Optional[str] = None,
         connect_timeout: float = 10.0,
         request_timeout: float = 60.0,
     ) -> None:
         import httpx
 
         self._url = url
+        self._token = token
         self._session_id: Optional[str] = None
         self._client = httpx.Client(
             timeout=httpx.Timeout(
@@ -140,11 +148,21 @@ class StreamableHTTPTransport(MCPTransport):
         return f"{parsed.scheme}://{parsed.netloc}"
 
     def _build_headers(self) -> dict:
-        """Build common request headers."""
+        """Build common request headers.
+
+        Sends ``Authorization: Bearer <token>`` when the transport was
+        constructed with a token (#461) — required by authenticated MCP
+        servers such as Home Assistant's. Falsy tokens (None / empty
+        string) deliberately do NOT send the header, matching the
+        upstream MCP spec and the cfg.get("token") plumbing in the
+        builder.
+        """
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
         }
+        if self._token:
+            headers["Authorization"] = f"Bearer {self._token}"
         if self._session_id is not None:
             headers["Mcp-Session-Id"] = self._session_id
         return headers

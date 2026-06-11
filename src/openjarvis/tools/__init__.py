@@ -83,6 +83,11 @@ except ImportError:
     pass
 
 try:
+    import openjarvis.tools.docker_shell_exec  # noqa: F401
+except ImportError:
+    pass
+
+try:
     import openjarvis.tools.shell_exec  # noqa: F401
 except ImportError:
     pass

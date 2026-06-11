@@ -4,6 +4,7 @@ import {
   Send,
   Square,
   Paperclip,
+  Search,
   FileAudio,
   Image as ImageIcon,
   X,
@@ -13,13 +14,22 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAppStore, generateId } from '../../lib/store';
-import { streamChat } from '../../lib/sse';
+import { streamChat, streamResearch } from '../../lib/sse';
 import { fetchSavings, getBase, isTauri, transcribeAudio, transcribeAudioFile } from '../../lib/api';
 import { isTranscriptArtifact } from '../../lib/artifacts';
+import { listConnectors, getSyncStatus } from '../../lib/connectors-api';
 import { MicButton } from './MicButton';
 import { AttachmentCard } from './AttachmentCard';
 import { useSpeech } from '../../hooks/useSpeech';
-import type { ChatAttachment, ChatMessage, ToolCallInfo, TokenUsage, MessageTelemetry } from '../../types';
+import type {
+  ChatAttachment,
+  ChatMessage,
+  MessageTelemetry,
+  ResearchSearchTrace,
+  ResearchSource,
+  TokenUsage,
+  ToolCallInfo,
+} from '../../types';
 
 interface AdvancedOptions {
   model: string;
@@ -56,6 +66,64 @@ const CLOUD_MODEL_PRESETS = [
   'openrouter/auto',
 ];
 
+// While Deep Research is toggled on, poll connected sources for sync
+// progress so we can surface "Searching over N items — sync in progress"
+// next to the toggle. Polling is gated on `enabled` so toggling DR off
+// stops the network chatter immediately.
+function useResearchCorpusSync(enabled: boolean): {
+  syncing: boolean;
+  itemsSynced: number;
+} {
+  const [state, setState] = useState({ syncing: false, itemsSynced: 0 });
+
+  useEffect(() => {
+    if (!enabled) {
+      setState({ syncing: false, itemsSynced: 0 });
+      return;
+    }
+    let cancelled = false;
+
+    const poll = async () => {
+      try {
+        const list = await listConnectors();
+        const connected = list.filter((c) => c.connected);
+        if (connected.length === 0) {
+          if (!cancelled) setState({ syncing: false, itemsSynced: 0 });
+          return;
+        }
+        const results = await Promise.all(
+          connected.map(async (c) => {
+            try {
+              return await getSyncStatus(c.connector_id);
+            } catch {
+              return null;
+            }
+          }),
+        );
+        let syncing = false;
+        let itemsSynced = 0;
+        for (const r of results) {
+          if (!r) continue;
+          if (r.state === 'syncing') syncing = true;
+          itemsSynced += r.items_synced ?? 0;
+        }
+        if (!cancelled) setState({ syncing, itemsSynced });
+      } catch {
+        // Network blip — leave previous state intact.
+      }
+    };
+
+    poll();
+    const interval = setInterval(poll, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [enabled]);
+
+  return state;
+}
+
 export function InputArea() {
   const [input, setInput] = useState('');
   const [pendingAttachments, setPendingAttachments] = useState<ChatAttachment[]>([]);
@@ -86,6 +154,9 @@ export function InputArea() {
   const setStreamState = useAppStore((s) => s.setStreamState);
   const resetStream = useAppStore((s) => s.resetStream);
   const modelLoading = useAppStore((s) => s.modelLoading);
+  const deepResearch = useAppStore((s) => s.deepResearch);
+  const setDeepResearch = useAppStore((s) => s.setDeepResearch);
+  const corpusSync = useResearchCorpusSync(deepResearch);
 
   const { state: speechState, available: speechAvailable, startRecording, stopRecording } = useSpeech();
 
@@ -485,6 +556,7 @@ export function InputArea() {
       role: 'assistant',
       content: '',
       timestamp: Date.now(),
+      isResearch: deepResearch || undefined,
     };
     addMessage(convId, assistantMsg);
 
@@ -510,12 +582,16 @@ export function InputArea() {
         }
       | undefined;
     const toolCalls: ToolCallInfo[] = [];
+    const researchTraces: ResearchSearchTrace[] = [];
+    const researchSourcesByRef = new Map<number, ResearchSource>();
+    const flushSources = () =>
+      Array.from(researchSourcesByRef.values()).sort((a, b) => a.ref - b.ref);
     let lastFlush = 0;
     let ttftMs: number | undefined;
 
     setStreamState({
       isStreaming: true,
-      phase: 'Generating...',
+      phase: deepResearch ? 'Researching...' : 'Generating...',
       elapsedMs: 0,
       activeToolCalls: [],
       content: '',
@@ -524,10 +600,136 @@ export function InputArea() {
       timestamp: Date.now(),
       level: 'info',
       category: 'chat',
-      message: `Request: "${displayContent.slice(0, 80)}${displayContent.length > 80 ? '...' : ''}" → ${effectiveModel}`,
+      message: deepResearch
+        ? `Research: "${content.slice(0, 80)}${content.length > 80 ? '...' : ''}"`
+        : `Request: "${displayContent.slice(0, 80)}${displayContent.length > 80 ? '...' : ''}" → ${effectiveModel}`,
     });
 
     try {
+      if (deepResearch) {
+        for await (const ev of streamResearch(content, controller.signal)) {
+          if (ev.type === 'search_call') {
+            const trace: ResearchSearchTrace = {
+              id: generateId(),
+              query: ev.arguments?.query ?? '',
+              person: ev.arguments?.person,
+              timeRange: ev.arguments?.time_range,
+              status: 'pending',
+            };
+            researchTraces.push(trace);
+            setStreamState({ phase: `Searching: ${trace.query}` });
+            updateLastAssistant(
+              convId,
+              accumulatedContent,
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              [...researchTraces],
+              flushSources(),
+            );
+            useAppStore.getState().addLogEntry({
+              timestamp: Date.now(),
+              level: 'info',
+              category: 'tool',
+              message: `Search: "${trace.query}"${trace.person ? ` (person: ${trace.person})` : ''}`,
+            });
+          } else if (ev.type === 'search_result') {
+            const pending = [...researchTraces].reverse().find((t) => t.status === 'pending');
+            if (pending) {
+              pending.status = 'complete';
+              pending.numHits = ev.num_hits;
+              pending.topTitles = ev.top_titles;
+            }
+            if (ev.sources) {
+              for (const src of ev.sources) {
+                if (src && typeof src.ref === 'number' && !researchSourcesByRef.has(src.ref)) {
+                  researchSourcesByRef.set(src.ref, src);
+                }
+              }
+            }
+            updateLastAssistant(
+              convId,
+              accumulatedContent,
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              [...researchTraces],
+              flushSources(),
+            );
+          } else if (ev.type === 'synthesis') {
+            if (!ttftMs) ttftMs = Date.now() - startTime;
+            accumulatedContent += ev.text;
+            setStreamState({ content: accumulatedContent, phase: '' });
+            const now = Date.now();
+            if (now - lastFlush >= 80) {
+              updateLastAssistant(
+                convId,
+                accumulatedContent,
+                undefined,
+                  undefined,
+                  undefined,
+                  undefined,
+                  undefined,
+                  [...researchTraces],
+                  flushSources(),
+                );
+              lastFlush = now;
+            }
+          } else if (ev.type === 'system_metrics') {
+            // Live GPU sample — feed straight to the System panel so Power
+            // (W) and Energy (kJ) tick up in real time as the agent runs.
+            useAppStore.getState().setLiveEnergy({
+              power_w: ev.power_w,
+              energy_j: ev.energy_j,
+              duration_s: ev.duration_s,
+            });
+          } else if (ev.type === 'error') {
+            // Backend setup/worker failure (Ollama down, planner model
+            // missing, KnowledgeStore locked, etc.). Without surfacing the
+            // message, the user sees only the generic "No response was
+            // generated" fallback and has no way to self-diagnose.
+            const msg = ev.message || 'Research failed (no detail provided)';
+            accumulatedContent = accumulatedContent
+              ? `${accumulatedContent}\n\n**Research stopped:** ${msg}`
+              : `**Research failed:** ${msg}`;
+            setStreamState({ content: accumulatedContent, phase: '' });
+            useAppStore.getState().addLogEntry({
+              timestamp: Date.now(),
+              level: 'error',
+              category: 'chat',
+              message: `Deep Research error: ${msg}`,
+            });
+            toast.error(msg, { duration: 8000 });
+          } else if (ev.type === 'done') {
+            if (ev.usage) {
+              usage = {
+                prompt_tokens: ev.usage.prompt_tokens ?? 0,
+                completion_tokens: ev.usage.completion_tokens ?? 0,
+                total_tokens:
+                  ev.usage.total_tokens ??
+                  (ev.usage.prompt_tokens ?? 0) +
+                    (ev.usage.completion_tokens ?? 0),
+              };
+              // Optimistically roll this research turn into the session
+              // counters so the Session panel updates the moment the
+              // stream finishes, regardless of how /v1/savings aggregates
+              // research telemetry server-side.
+              useAppStore.getState().incrementSavings(usage);
+            }
+            // Hold the final live numbers visible for a beat so the panel
+            // doesn't flash to 0 between the SSE close and the next
+            // /v1/telemetry/energy poll picking up the persisted record.
+            window.setTimeout(() => {
+              useAppStore.getState().setLiveEnergy(null);
+            }, 1500);
+            break;
+          }
+        }
+      } else {
       for await (const sseEvent of streamChat(
         {
           model: effectiveModel,
@@ -615,6 +817,7 @@ export function InputArea() {
           } catch {}
         }
       }
+      }
     } catch (err: any) {
       if (err.name === 'AbortError') {
         // User cancelled or model switch — keep whatever was accumulated
@@ -628,6 +831,9 @@ export function InputArea() {
           message: `Stream error: ${errMsg}`,
         });
       }
+      // If we tore out mid-research, make sure the live System panel
+      // numbers don't get stuck on the last sample.
+      useAppStore.getState().setLiveEnergy(null);
     } finally {
       if (!accumulatedContent) {
         accumulatedContent = 'No response was generated. Please try again.';
@@ -682,6 +888,8 @@ export function InputArea() {
         telemetry,
         audioMeta,
         hiddenTranscriptContext,
+        researchTraces.length > 0 ? researchTraces : undefined,
+        researchSourcesByRef.size > 0 ? flushSources() : undefined,
       );
       if (timerRef.current) {
         clearInterval(timerRef.current);
@@ -694,9 +902,15 @@ export function InputArea() {
       });
       abortRef.current = null;
 
-      fetchSavings()
-        .then((data) => useAppStore.getState().setSavings(data))
-        .catch(() => {});
+      // Research path updates session counters optimistically from the
+      // `done` event's usage payload — re-fetching here would overwrite
+      // it with a potentially stale snapshot if the server's research
+      // telemetry hasn't been merged into /v1/savings yet.
+      if (!deepResearch) {
+        fetchSavings()
+          .then((data) => useAppStore.getState().setSavings(data))
+          .catch(() => {});
+      }
     }
   }, [
     input,
@@ -710,6 +924,7 @@ export function InputArea() {
     transcribeAudioIntoLastAssistant,
     setStreamState,
     resetStream,
+    deepResearch,
     temperature,
     maxTokens,
     advancedOptions,
@@ -857,6 +1072,39 @@ export function InputArea() {
           ))}
         </div>
       )}
+
+      <div className="mb-2 flex flex-col gap-1">
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setDeepResearch(!deepResearch)}
+            disabled={streamState.isStreaming}
+            aria-pressed={deepResearch}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs transition-colors cursor-pointer disabled:cursor-default disabled:opacity-50"
+            style={{
+              background: deepResearch ? 'var(--color-accent-subtle)' : 'transparent',
+              border: `1px solid ${deepResearch ? 'var(--color-accent)' : 'var(--color-border)'}`,
+              color: deepResearch ? 'var(--color-accent)' : 'var(--color-text-tertiary)',
+            }}
+            title={deepResearch ? 'Deep Research: on' : 'Deep Research: off'}
+          >
+            <Search size={12} />
+            Deep Research
+          </button>
+        </div>
+        {deepResearch && corpusSync.syncing && corpusSync.itemsSynced > 0 && (
+          <div
+            className="text-[11px] leading-snug"
+            style={{ color: 'var(--color-text-tertiary)' }}
+          >
+            Searching over{' '}
+            <span key={corpusSync.itemsSynced} className="sync-bump" style={{ color: 'var(--color-text-secondary)' }}>
+              {corpusSync.itemsSynced.toLocaleString()}
+            </span>{' '}
+            items — sync in progress, results will improve as more data is indexed.
+          </div>
+        )}
+      </div>
       <div
         className="relative flex items-center gap-2 rounded-2xl px-4 py-3 transition-shadow"
         style={{
@@ -917,7 +1165,7 @@ export function InputArea() {
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Message OpenJarvis..."
+          placeholder={selectedModel ? 'Message OpenJarvis...' : 'Pick a model first (⌘K)...'}
           rows={1}
           className="flex-1 bg-transparent outline-none resize-none text-sm leading-relaxed"
           style={{ color: 'var(--color-text)', maxHeight: '200px' }}
@@ -955,13 +1203,17 @@ export function InputArea() {
             />
             <button
               onClick={() => sendMessage()}
-              disabled={(!input.trim() && pendingAttachments.length === 0) || modelLoading}
+              disabled={
+                (!input.trim() && pendingAttachments.length === 0) ||
+                modelLoading ||
+                (!selectedModel && models.length === 0)
+              }
+              title={selectedModel || models.length > 0 ? 'Send message' : 'Pick a model first (⌘K)'}
               className="p-2 rounded-xl transition-colors shrink-0 cursor-pointer disabled:opacity-30 disabled:cursor-default"
               style={{
                 background: input.trim() || pendingAttachments.length > 0 ? 'var(--color-accent)' : 'var(--color-bg-tertiary)',
                 color: input.trim() || pendingAttachments.length > 0 ? 'white' : 'var(--color-text-tertiary)',
               }}
-              title="Send message"
             >
               <Send size={16} />
             </button>

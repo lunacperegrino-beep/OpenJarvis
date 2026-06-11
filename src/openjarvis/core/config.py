@@ -14,7 +14,15 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+if TYPE_CHECKING:
+    # Only used by type-checkers (mypy/pyright) for the ``JarvisConfig.mining``
+    # field annotation. The runtime import is deferred inside
+    # ``_parse_mining_section()`` to break the import cycle:
+    # ``mining/_stubs.py`` imports ``HardwareInfo`` from this module at its
+    # top level.
+    from openjarvis.mining._stubs import MiningConfig
 
 try:
     import tomllib  # Python 3.11+
@@ -83,7 +91,7 @@ def _detect_nvidia_gpu() -> Optional[GpuInfo]:
     raw = _run_cmd(
         [
             "nvidia-smi",
-            "--query-gpu=name,memory.total,count",
+            "--query-gpu=name,memory.total,count,compute_cap",
             "--format=csv,noheader,nounits",
         ]
     )
@@ -95,10 +103,12 @@ def _detect_nvidia_gpu() -> Optional[GpuInfo]:
         name = parts[0]
         vram_mb = float(parts[1])
         count = int(parts[2])
+        compute_capability = parts[3] if len(parts) > 3 else ""
         return GpuInfo(
             vendor="nvidia",
             name=name,
             vram_gb=round(vram_mb / 1024, 1),
+            compute_capability=compute_capability,
             count=count,
         )
     except (IndexError, ValueError):
@@ -178,13 +188,34 @@ def _total_ram_gb() -> float:
         if platform.system() == "Darwin":
             raw = _run_cmd(["sysctl", "-n", "hw.memsize"])
             return round(int(raw) / (1024**3), 1) if raw else 0.0
+        if platform.system() == "Windows":
+            import ctypes
+
+            class _MemoryStatusEx(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("sullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            stat = _MemoryStatusEx()
+            stat.dwLength = ctypes.sizeof(_MemoryStatusEx)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+                return round(stat.ullTotalPhys / (1024**3), 1)
+            return 0.0
         meminfo = Path("/proc/meminfo")
         if meminfo.exists():
             for line in meminfo.read_text().splitlines():
                 if line.startswith("MemTotal"):
                     kb = int(line.split()[1])
                     return round(kb / (1024**2), 1)
-    except (OSError, ValueError):
+    except (OSError, ValueError, AttributeError):
         pass
     return 0.0
 
@@ -249,20 +280,23 @@ _MODEL_TIERS = [
     (64, "qwen3.5:27b"),
 ]
 _MODEL_TIER_FALLBACK = "qwen3.5:27b"
+_LEMONADE_DEFAULT_MODEL = "Qwen3.6-35B-A3B-GGUF"
 
 
 def recommend_model(hw: HardwareInfo, engine: str) -> str:
-    """Suggest the best Qwen3.5 model that fits the detected hardware.
+    """Suggest a default model for the selected engine and hardware.
 
-    Uses an explicit tier table mapping available memory to model size.
-    Falls back to scanning the full catalog if the tiered model is not
-    compatible with the selected engine.
+    For Lemonade, prefer the validated Qwen3.6 35B A3B GGUF default.
+    For other local engines, use the generic Qwen3.5 tier mapping.
     """
     from openjarvis.intelligence.model_catalog import BUILTIN_MODELS
 
     available_gb = _available_memory_gb(hw)
     if available_gb <= 0:
         return ""
+
+    if engine == "lemonade":
+        return _LEMONADE_DEFAULT_MODEL
 
     # Build a lookup for quick engine-compatibility checks
     catalog = {spec.model_id: spec for spec in BUILTIN_MODELS}
@@ -391,7 +425,7 @@ class GemmaCppEngineConfig:
 class LemonadeEngineConfig:
     """Per-engine config for Lemonade."""
 
-    host: str = "http://localhost:8000"
+    host: str = "http://localhost:13305"
 
 
 @dataclass
@@ -636,6 +670,52 @@ class GEPAOptimizerConfig:
 
 
 @dataclass(slots=True)
+class ACEOptimizerConfig:
+    """ACE agent optimizer config. Maps to ``[learning.agent.ace]``.
+
+    ACE (Agentic Context Engineering) evolves a *playbook* — annotated
+    natural-language strategies that get prepended to the agent's
+    context — using a Generator / Reflector / Curator triad. Unlike
+    DSPy (few-shot bootstrapping) or GEPA (Pareto-evolutionary prompt
+    mutation), ACE writes a textual playbook that the agent reads at
+    inference time.
+
+    See https://github.com/ace-agent/ace for the upstream reference.
+    Install via ``pip install -e openjarvis[learning-ace]`` once the
+    optional dep is available (ACE is not on PyPI as of v1.0.1; the
+    extra installs from the upstream git repo).
+    """
+
+    # Models for ACE's three roles. Empty string = inherit from the
+    # intelligence primitive's default cloud model.
+    generator_model: str = ""
+    reflector_model: str = ""
+    curator_model: str = ""
+
+    # Provider passed to ACE (``sambanova`` | ``together`` | ``openai``
+    # | ``commonstack``). We default to ``openai`` since that's what
+    # most OpenJarvis users have credentials for.
+    api_provider: str = "openai"
+
+    # Run parameters. Defaults mirror ACE's offline-mode quickstart.
+    num_epochs: int = 1
+    max_num_rounds: int = 3
+    eval_steps: int = 100
+    playbook_token_budget: int = 80_000
+    max_tokens: int = 4_096
+
+    # Where ACE writes intermediate playbooks + final_results.json.
+    # Empty string defaults to ``~/.openjarvis/learning/ace/<task>/``.
+    save_dir: str = ""
+    task_name: str = "openjarvis"
+
+    # Standard filter / threshold knobs shared with DSPy / GEPA.
+    min_traces: int = 20
+    agent_filter: str = ""
+    config_dir: str = ""
+
+
+@dataclass(slots=True)
 class IntelligenceLearningConfig:
     """Intelligence sub-policy config within Learning."""
 
@@ -648,9 +728,10 @@ class IntelligenceLearningConfig:
 class AgentLearningConfig:
     """Agent sub-policy config within Learning."""
 
-    policy: str = "none"  # none | dspy | gepa
+    policy: str = "none"  # none | dspy | gepa | ace
     dspy: DSPyOptimizerConfig = field(default_factory=DSPyOptimizerConfig)
     gepa: GEPAOptimizerConfig = field(default_factory=GEPAOptimizerConfig)
+    ace: ACEOptimizerConfig = field(default_factory=ACEOptimizerConfig)
 
 
 @dataclass(slots=True)
@@ -674,6 +755,54 @@ class MetricsConfig:
     efficiency_weight: float = 0.1
 
 
+@dataclass(slots=True)
+class SpecSearchCompositeRewardConfig:
+    """Composite reward weights for Intelligence-edit training (paper Eq. 1).
+
+    R(q, y) = alpha * R_acc - beta * E_hat - gamma * L_hat - delta * C_hat
+    """
+
+    alpha: float = 0.5
+    beta: float = 0.1
+    gamma: float = 0.1
+    delta: float = 0.3
+
+
+@dataclass(slots=True)
+class SpecSearchLearningConfig:
+    """LLM-guided spec search config (paper §3.3, Algorithm 1).
+
+    Maps to ``[learning.spec_search]`` and is consumed by
+    ``SpecSearchOrchestrator.from_config`` and ``SpecSearchLoop``.
+    """
+
+    enabled: bool = False
+    teacher_model: str = "claude-opus-4-6"
+    teacher_engine: str = "cloud"  # registry key for the cloud engine
+    autonomy_mode: str = "tiered"  # auto | tiered | manual
+
+    # Per-session bounds (one diagnose/plan/execute pass)
+    min_traces: int = 20
+    max_cost_per_session_usd: float = 5.0
+    max_tool_calls_per_diagnosis: int = 30
+
+    # Multi-session loop (paper Algorithm 1)
+    stagnation_k: int = 5
+    max_total_cost_usd: float = 50.0
+    stagnation_eps: float = 0.001  # gate-score delta below this counts as no progress
+
+    # Gate (GateOK predicate)
+    max_regression: float = 0.01  # paper default: epsilon = 1%
+    min_improvement: float = 0.0
+    benchmark_subsample_size: int = 50
+    benchmark_version: str = "personal_v1"
+
+    # Composite reward (only used when an Intelligence edit triggers training)
+    composite_reward: SpecSearchCompositeRewardConfig = field(
+        default_factory=SpecSearchCompositeRewardConfig,
+    )
+
+
 @dataclass
 class LearningConfig:
     """Learning system settings with per-primitive sub-policies."""
@@ -687,6 +816,9 @@ class LearningConfig:
     )
     agent: AgentLearningConfig = field(default_factory=AgentLearningConfig)
     skills: SkillsLearningConfig = field(default_factory=SkillsLearningConfig)
+    spec_search: SpecSearchLearningConfig = field(
+        default_factory=SpecSearchLearningConfig,
+    )
     metrics: MetricsConfig = field(default_factory=MetricsConfig)
 
     # Training pipeline
@@ -843,8 +975,10 @@ class ServerConfig:
         default_factory=lambda: [
             "http://localhost:3000",
             "http://localhost:5173",
+            "http://localhost:5174",
             "http://127.0.0.1:3000",
             "http://127.0.0.1:5173",
+            "http://127.0.0.1:5174",
             # Tauri 2 production webview origins.
             # macOS / Linux / iOS use the custom scheme; Windows /
             # Android use http(s)://tauri.localhost. All three must
@@ -872,11 +1006,45 @@ class TelemetryConfig:
 
 
 @dataclass(slots=True)
+class AnalyticsConfig:
+    """External anonymous usage analytics (PostHog).
+
+    Separate concern from :class:`TelemetryConfig`, which stores local
+    FLOPs/energy/inference metrics in SQLite. This controls anonymized
+    usage events sent to the OpenJarvis team's PostHog instance to
+    measure setup success, retention, feature usage, and churn.
+
+    No chat content, prompts, model outputs, file paths, emails, IPs,
+    or hardware identifiers are ever sent. See ``docs/telemetry.md``.
+    """
+
+    enabled: bool = True
+    host: str = "https://34.231.106.201.sslip.io"
+    key: str = "phc_ysKu72QaxzYNmDpHFcesD2ZZAe68zkdWJEKoYYkc5e3n"
+    anon_id_path: str = str(DEFAULT_CONFIG_DIR / "anon_id")
+    flush_interval_seconds: int = 30
+    flush_at_size: int = 100
+
+
+@dataclass(slots=True)
 class TracesConfig:
     """Trace system settings."""
 
     enabled: bool = True
     db_path: str = str(DEFAULT_CONFIG_DIR / "traces.db")
+
+
+@dataclass(slots=True)
+class ProactiveConfig:
+    """Proactive agent — autonomous action scheduling and approval routing."""
+
+    enabled: bool = False
+    schedule: str = "0 5 * * *"  # cron expression (default: 5am daily)
+    hours_back: int = 24  # how many hours of unacted items to scan
+    timezone: str = "America/Los_Angeles"
+    # Channel to send approval notifications and receive yes/no replies.
+    # Format: "{type}:{id}", e.g. "imessage:+15551234567" or "telegram:123456789"
+    notification_channel: str = ""
 
 
 @dataclass(slots=True)
@@ -1205,6 +1373,9 @@ class A2AConfig:
     """Agent-to-Agent protocol settings."""
 
     enabled: bool = False
+    # Bearer token required for inbound A2A requests. Empty = unauthenticated
+    # (only safe on a trusted network). See ``A2AServer(auth_token=...)``.
+    auth_token: str = ""
 
 
 @dataclass(slots=True)
@@ -1258,12 +1429,14 @@ class MemoryFilesConfig:
     memory_path: str = "~/.openjarvis/MEMORY.md"
     user_path: str = "~/.openjarvis/USER.md"
     nudge_interval: int = 10
+    persona_name: str = ""  # named persona dir under ~/.openjarvis/personas/<name>/
 
 
 @dataclass(slots=True)
 class SystemPromptConfig:
     """Limits and strategy for system-prompt assembly."""
 
+    prefix: str = ""
     soul_max_chars: int = 4000
     memory_max_chars: int = 2500
     user_max_chars: int = 1500
@@ -1354,6 +1527,8 @@ class DigestConfig:
 class JarvisConfig:
     """Top-level configuration for OpenJarvis."""
 
+    installed_at: str = ""
+    installer_version: str = ""
     hardware: HardwareInfo = field(default_factory=HardwareInfo)
     engine: EngineConfig = field(default_factory=EngineConfig)
     intelligence: IntelligenceConfig = field(default_factory=IntelligenceConfig)
@@ -1362,6 +1537,7 @@ class JarvisConfig:
     agent: AgentConfig = field(default_factory=AgentConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
     telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
+    analytics: AnalyticsConfig = field(default_factory=AnalyticsConfig)
     traces: TracesConfig = field(default_factory=TracesConfig)
     channel: ChannelConfig = field(default_factory=ChannelConfig)
     security: SecurityConfig = field(default_factory=SecurityConfig)
@@ -1379,6 +1555,8 @@ class JarvisConfig:
     compression: CompressionConfig = field(default_factory=CompressionConfig)
     skills: SkillsConfig = field(default_factory=SkillsConfig)
     digest: DigestConfig = field(default_factory=DigestConfig)
+    proactive: ProactiveConfig = field(default_factory=ProactiveConfig)
+    mining: Optional["MiningConfig"] = None
 
     @property
     def memory(self) -> StorageConfig:
@@ -1397,7 +1575,10 @@ class JarvisConfig:
 
 # Sections that users may set via ``jarvis config set``.
 # ``hardware`` is auto-detected and not user-settable.
-_SETTABLE_SECTIONS = frozenset(JarvisConfig.__dataclass_fields__.keys()) - {"hardware"}
+_SETTABLE_SECTIONS = frozenset(JarvisConfig.__dataclass_fields__.keys()) - {
+    "hardware",
+    "mining",
+}
 
 
 def validate_config_key(dotted_key: str) -> type:
@@ -1538,6 +1719,47 @@ def _migrate_toml_data(data: Dict[str, Any], cfg: "JarvisConfig") -> None:
                 )
 
 
+def _parse_mining_section(data: dict) -> Optional["MiningConfig"]:
+    """Parse the ``[mining]`` TOML section into a ``MiningConfig``.
+
+    Returns None if the section is absent. Resolves the ``submit_target``
+    string into a ``SoloTarget`` or ``PoolTarget`` tagged union.
+    """
+    if "mining" not in data:
+        return None
+
+    # Lazy runtime import to break the import cycle: ``mining/_stubs.py``
+    # imports ``HardwareInfo`` from this module at its top level. By the
+    # time ``_parse_mining_section`` is called, ``core.config`` is already
+    # fully initialized in ``sys.modules``, so the cycle is harmless.
+    from openjarvis.mining._stubs import MiningConfig, PoolTarget, SoloTarget
+
+    section = data["mining"]
+    extra = section.get("extra", {}) or {}
+
+    target_str = section.get("submit_target", "solo")
+    submit_target: Any
+    if target_str == "solo":
+        submit_target = SoloTarget(
+            pearld_rpc_url=extra.get("pearld_rpc_url", "http://localhost:44107")
+        )
+    elif isinstance(target_str, str) and target_str.startswith("pool:"):
+        submit_target = PoolTarget(url=target_str[len("pool:") :])
+    else:
+        raise ValueError(
+            f"[mining].submit_target must be 'solo' or 'pool:<url>', got {target_str!r}"
+        )
+
+    return MiningConfig(
+        provider=section["provider"],
+        wallet_address=section["wallet_address"],
+        submit_target=submit_target,
+        fee_bps=int(section.get("fee_bps", 0)),
+        fee_payout_address=section.get("fee_payout_address") or None,
+        extra={k: v for k, v in extra.items()},
+    )
+
+
 @functools.lru_cache(maxsize=1)
 def load_config(path: Optional[Path] = None) -> JarvisConfig:
     """Detect hardware, build defaults, overlay TOML overrides.
@@ -1575,6 +1797,7 @@ def load_config(path: Optional[Path] = None) -> JarvisConfig:
             "agent",
             "server",
             "telemetry",
+            "analytics",
             "traces",
             "security",
             "channel",
@@ -1589,6 +1812,11 @@ def load_config(path: Optional[Path] = None) -> JarvisConfig:
             "optimize",
             "agent_manager",
             "digest",
+            "proactive",
+            "memory_files",
+            "system_prompt",
+            "compression",
+            "skills",
         )
         for section_name in top_sections:
             if section_name in data:
@@ -1601,9 +1829,17 @@ def load_config(path: Optional[Path] = None) -> JarvisConfig:
         if "memory" in data:
             _apply_toml_section(cfg.tools.storage, data["memory"])
 
+        # Top-level install provenance (installed_at, installer_version)
+        for key in ("installed_at", "installer_version"):
+            if key in data:
+                setattr(cfg, key, data[key])
+
         # Expand security profile (user TOML overrides take precedence)
         _user_security_keys = set(data.get("security", {}).keys())
         apply_security_profile(cfg.security, cfg.server, overrides=_user_security_keys)
+
+        # Mining: dedicated parser for tagged-union submit_target
+        cfg.mining = _parse_mining_section(data)
 
     # Apply profile even without a config file (in case defaults set one)
     if not config_path.exists() and cfg.security.profile:
