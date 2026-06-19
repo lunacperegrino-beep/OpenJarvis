@@ -61,6 +61,109 @@ Build the server static frontend:
 npm --prefix frontend run build
 ```
 
+## Local Automation Stack
+
+This Mac runs the local assistant stack from user LaunchAgents and Homebrew
+tooling:
+
+- API LaunchAgent:
+  `/Users/sixx/Library/LaunchAgents/com.sixx.openjarvis.api.plist`
+- UI LaunchAgent:
+  `/Users/sixx/Library/LaunchAgents/com.sixx.openjarvis.ui.plist`
+- Ollama Homebrew service:
+  `/Users/sixx/Library/LaunchAgents/homebrew.mxcl.ollama.plist`
+- Wrapper scripts:
+  `/Users/sixx/.openjarvis/bin`
+- Logs:
+  `/Users/sixx/.openjarvis/logs`
+
+Start or restart the local stack:
+
+```bash
+/Users/sixx/.openjarvis/bin/start-openjarvis.sh
+```
+
+The wrapper waits up to 180 seconds for each health endpoint. Cold starts can
+be slower after a venv refresh or Rust bridge rebuild.
+
+Stop API and UI only:
+
+```bash
+/Users/sixx/.openjarvis/bin/stop-openjarvis.sh
+```
+
+Stop API, UI, and Ollama:
+
+```bash
+/Users/sixx/.openjarvis/bin/stop-openjarvis.sh --all
+```
+
+The active local model policy is intentionally small:
+
+```text
+qwen3:0.6b
+nomic-embed-text:latest
+```
+
+Do not pull larger Ollama models on this machine without explicit approval.
+
+The Apple MCP server is launched through:
+
+```text
+/Users/sixx/.openjarvis/bin/apple-mcp-openjarvis.sh
+```
+
+That wrapper uses Homebrew Bun and filters non-JSON Apple MCP stdout before it
+reaches OpenJarvis' stdio MCP transport.
+
+## Local Secret Handling
+
+Do not store API keys directly in `~/.openjarvis/config.toml`, LaunchAgent
+plists, shell scripts, or Docker container environment variables.
+
+Keep local telemetry disabled in `~/.openjarvis/config.toml` unless there is an
+explicit debugging need to send startup/runtime telemetry off-machine.
+
+OpenJarvis cloud fallback should read Anthropic credentials from the macOS
+Keychain item named `openjarvis-anthropic-api-key`:
+
+```bash
+security add-generic-password \
+  -a "$USER" \
+  -s openjarvis-anthropic-api-key \
+  -w 'PASTE_NEW_KEY_HERE' \
+  -U
+```
+
+If a GitHub MCP server is needed, prefer the Docker MCP Toolkit's OS Keychain
+secret support or this app's GitHub connector. Do not run
+`ghcr.io/github/github-mcp-server` with `GITHUB_PERSONAL_ACCESS_TOKEN` injected
+directly as a container environment variable; local `docker inspect` can expose
+it.
+
+After changing secrets, restart the stack:
+
+```bash
+/Users/sixx/.openjarvis/bin/start-openjarvis.sh
+```
+
+## Local Health Checks
+
+```bash
+curl -fsS http://127.0.0.1:8000/health
+curl -fsS http://127.0.0.1:11434/api/tags
+curl -fsSI http://127.0.0.1:5173/
+curl -fsS http://127.0.0.1:8000/v1/models
+```
+
+Inspect LaunchAgent state:
+
+```bash
+launchctl print "gui/$(id -u)/com.sixx.openjarvis.api"
+launchctl print "gui/$(id -u)/com.sixx.openjarvis.ui"
+brew services list
+```
+
 ## Desktop App Build
 
 For a local app bundle, disable updater artifacts unless the private updater signing key is configured:
