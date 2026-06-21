@@ -14,16 +14,28 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
-        with:
-          token: ${{ secrets.TRAFFIC_TOKEN }}
+
+      - name: Check traffic token
+        id: traffic-token
+        env:
+          TRAFFIC_TOKEN: ${{ secrets.TRAFFIC_TOKEN }}
+        run: |
+          if [ -n "$TRAFFIC_TOKEN" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::TRAFFIC_TOKEN is not configured; skipping clone traffic update."
+          fi
 
       - name: Fetch clone traffic
+        if: steps.traffic-token.outputs.available == 'true'
         env:
           GH_TOKEN: ${{ secrets.TRAFFIC_TOKEN }}
         run: |
           gh api repos/${{ github.repository }}/traffic/clones > /tmp/traffic.json
 
       - name: Update accumulated data
+        if: steps.traffic-token.outputs.available == 'true'
         run: |
           python3 - <<'PYEOF'
           import json
@@ -74,6 +86,7 @@ jobs:
           PYEOF
 
       - name: Commit and push
+        if: steps.traffic-token.outputs.available == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
